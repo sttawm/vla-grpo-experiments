@@ -7,7 +7,7 @@ set -euo pipefail
 PROJECT="emg2qwerty-team-shared"
 ZONE="us-central1-a"
 VM="vla-train"
-MACHINE="a2-ultragpu-1g"  # 1× A100 80GB, 12 vCPUs, 170 GB RAM
+MACHINE="a2-highgpu-1g"   # 1× A100 40GB, 12 vCPUs, 85 GB RAM (LoRA fits comfortably)
 IMAGE_FAMILY="pytorch-latest-gpu"
 IMAGE_PROJECT="deeplearning-platform-release"
 
@@ -16,7 +16,7 @@ gcloud compute instances create "$VM" \
     --project="$PROJECT" \
     --zone="$ZONE" \
     --machine-type="$MACHINE" \
-    --accelerator="type=nvidia-a100-80gb,count=1" \
+    --accelerator="type=nvidia-tesla-a100,count=1" \
     --image-family="$IMAGE_FAMILY" \
     --image-project="$IMAGE_PROJECT" \
     --boot-disk-size=200GB \
@@ -42,6 +42,7 @@ echo "  gcloud compute ssh $VM --zone=$ZONE --project=$PROJECT"
 echo ""
 echo "Then run:"
 echo "  cd experiments"
-echo "  python probe_schema.py          # verify Bridge field names"
-echo "  python baseline_eval.py         # ~200 episodes, saves results/baseline.json"
-echo "  python grpo_train.py --steps 1000"
+echo "  python probe_schema.py                    # verify Bridge field names"
+echo "  python baseline_eval.py                   # ~200 episodes, ~3 hr"
+echo "  python test_prompts.py --n_episodes 5     # pick best prompt variant"
+echo "  python grpo_train.py --steps 1000 --prompt_variant D_fewshot"

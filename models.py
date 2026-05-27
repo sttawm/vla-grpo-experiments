@@ -66,17 +66,26 @@ def _build_qwen_messages(goal: str, frames: list[np.ndarray]) -> list[dict]:
     return [{"role": "user", "content": image_content + [text_content]}]
 
 
-def plan_vlm2(goal: str, frame_history: list[np.ndarray],
-              do_sample: bool = False, temperature: float = 1.0) -> tuple[str, str]:
+def plan_vlm2(
+    goal: str,
+    frame_history: list[np.ndarray],
+    do_sample: bool = False,
+    temperature: float = 1.0,
+    messages_fn=None,
+) -> tuple[str, str]:
     """
-    Generate a 4-step plan from Qwen and return (full_plan_text, step_1_label).
-    frame_history: list of up to N_HISTORY frames (numpy uint8 RGB).
+    Generate a plan from Qwen and return (full_plan_text, step_1_label).
+    frame_history : list of up to N_HISTORY frames (numpy uint8 RGB).
+    messages_fn   : optional callable (goal, frames) -> chat messages list.
+                    Defaults to _build_qwen_messages (prompt variant A).
     """
     load_vlm2()
-    frames = frame_history[-N_HISTORY:]
-    messages = _build_qwen_messages(goal, frames)
+    frames = list(frame_history[-N_HISTORY:])
+    if messages_fn is None:
+        messages_fn = _build_qwen_messages
+    messages = messages_fn(goal, frames)
 
-    text_input = _qwen_processor.apply_chat_template(
+    text_input   = _qwen_processor.apply_chat_template(
         messages, tokenize=False, add_generation_prompt=True
     )
     image_inputs = [Image.fromarray(f) for f in frames]
@@ -96,8 +105,8 @@ def plan_vlm2(goal: str, frame_history: list[np.ndarray],
         out = _qwen_model.generate(**inputs, **gen_kwargs)
 
     generated = out[0][inputs["input_ids"].shape[1]:]
-    full_text = _qwen_processor.decode(generated, skip_special_tokens=True).strip()
-    step1 = _parse_step1(full_text)
+    full_text  = _qwen_processor.decode(generated, skip_special_tokens=True).strip()
+    step1      = _parse_step1(full_text)
     return full_text, step1
 
 

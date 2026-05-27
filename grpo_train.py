@@ -1,16 +1,18 @@
 """
-GRPO training: tune VLM₂ (Qwen2.5-VL-7B) using VLM₃ (OpenVLA-OFT) as reward.
+GRPO training: tune VLM₂ (Qwen2.5-VL-7B) with LoRA using VLM₃ (OpenVLA-OFT) as reward.
 
 For each training step:
   1. Sample a Bridge episode and a random timestep
   2. Feed last 4 frames + goal to Qwen K=8 times (temperature sampling) → K plans
-  3. For each plan, pass step 1 to OpenVLA-OFT → predicted action
-  4. Reward = -L2(predicted, GT)  for each of the K samples
+  3. For each plan, pass step 1 + current frame to OpenVLA-OFT → predicted action
+  4. Reward = -L2(predicted, GT) for each of the K samples
   5. Normalise rewards within the group (GRPO)
-  6. Policy gradient update on Qwen
+  6. Policy gradient update on LoRA adapters only
 
 Run:
-  python grpo_train.py [--steps 1000] [--k_samples 8] [--lr 1e-5]
+  python grpo_train.py [--steps 1000] [--k_samples 8] [--lr 3e-4] [--prompt_variant D_fewshot]
+
+Run test_prompts.py first to choose the best --prompt_variant for your setup.
 """
 
 import argparse
@@ -18,22 +20,45 @@ import json
 import numpy as np
 import torch
 from pathlib import Path
+from peft import get_peft_model, LoraConfig, TaskType
 
 from bridge_loader import iter_episodes
 from models import (
     plan_vlm2, predict_vlm3,
     load_vlm2, load_vlm3,
-    _qwen_model, _qwen_processor,
-    N_HISTORY, N_PLAN_STEPS,
-    DEVICE, DTYPE, VLM2_MODEL_ID,
+    N_HISTORY, DEVICE, DTYPE,
 )
+from prompt_variants import VARIANTS
 
 RESULTS_DIR = Path(__file__).parent / "results"
 RESULTS_DIR.mkdir(exist_ok=True)
 
-K_SAMPLES   = 8      # GRPO group size
-TEMPERATURE = 1.0    # sampling temperature for GRPO rollouts
-EPS_CLIP    = 0.2    # PPO-style clip for GRPO
+K_SAMPLES   = 8
+TEMPERATURE = 1.0
+EPS_CLIP    = 0.2
+
+# LoRA config — targets attention + FFN projections in the language model
+LORA_RANK    = 32
+LORA_ALPHA   = 64
+LORA_DROPOUT = 0.05
+LORA_TARGETS = [
+    "q_proj", "k_proj", "v_proj", "o_proj",
+    "gate_proj", "up_proj", "down_proj",
+]
+
+
+def _apply_lora(model):
+    config = LoraConfig(
+        task_type=TaskType.CAUSAL_LM,
+        r=LORA_RANK,
+        lora_alpha=LORA_ALPHA,
+        lora_dropout=LORA_DROPOUT,
+        target_modules=LORA_TARGETS,
+        bias="none",
+    )
+    model = get_peft_model(model, config)
+    model.print_trainable_parameters()
+    return model
 
 
 def _grpo_step(
@@ -42,73 +67,57 @@ def _grpo_step(
     current_frame,
     gt_action: np.ndarray,
     optimizer: torch.optim.Optimizer,
+    messages_fn,
     k: int = K_SAMPLES,
 ) -> dict:
-    """
-    Single GRPO update step.
-    Returns a dict with per-sample rewards and the policy loss.
-    """
-    import models as M
+    from models import _qwen_model as qwen, _qwen_processor as proc
+    from models import _build_qwen_messages
+    from PIL import Image as PILImage
 
-    # ── 1. Reference log-probs (no grad) ──────────────────────────────────────
-    # We use the current policy as its own reference (simplified GRPO without
-    # a frozen ref model). This is appropriate for early training stages.
-
-    # ── 2. Sample K plans from Qwen ───────────────────────────────────────────
-    plans, step1s, log_probs = [], [], []
-
+    # ── 1. Sample K plans ─────────────────────────────────────────────────────
+    plans, step1s = [], []
     for _ in range(k):
         full_text, step1 = plan_vlm2(
-            goal, frame_history, do_sample=True, temperature=TEMPERATURE
+            goal, frame_history,
+            do_sample=True, temperature=TEMPERATURE,
+            messages_fn=messages_fn,
         )
         plans.append(full_text)
         step1s.append(step1)
 
-    # ── 3. Compute rewards via VLM₃ ───────────────────────────────────────────
+    # ── 2. Compute rewards via VLM₃ ───────────────────────────────────────────
     rewards = np.array([
         -float(np.linalg.norm(predict_vlm3(s, current_frame) - gt_action))
         for s in step1s
     ], dtype=np.float32)
 
-    # ── 4. GRPO normalisation ─────────────────────────────────────────────────
-    r_mean = rewards.mean()
-    r_std  = rewards.std() + 1e-8
-    advantages = (rewards - r_mean) / r_std   # shape (K,)
+    # ── 3. GRPO normalisation ─────────────────────────────────────────────────
+    r_mean     = rewards.mean()
+    r_std      = rewards.std() + 1e-8
+    advantages = (rewards - r_mean) / r_std
 
-    # ── 5. Policy gradient loss ───────────────────────────────────────────────
-    # Re-compute log-probs of each sampled plan under current policy
-    # so we get a differentiable loss.
-    loss = torch.tensor(0.0, device=DEVICE, requires_grad=True)
-    load_vlm2()   # ensure loaded
-
-    from models import _qwen_model as qwen, _qwen_processor as proc
-    from models import _build_qwen_messages
-    from PIL import Image as PILImage
+    # ── 4. Policy gradient loss over LoRA adapters ────────────────────────────
+    frames_use = list(frame_history[-N_HISTORY:])
+    frames_pil = [PILImage.fromarray(f) for f in frames_use]
+    messages   = messages_fn(goal, frames_use)
+    text_input = proc.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True
+    )
+    inputs = proc(
+        text=[text_input],
+        images=frames_pil,
+        return_tensors="pt",
+        padding=True,
+    ).to(DEVICE)
 
     total_loss = torch.zeros(1, device=DEVICE)
 
     for plan_text, adv in zip(plans, advantages):
-        frames_pil = [PILImage.fromarray(f) for f in frame_history[-N_HISTORY:]]
-        messages   = _build_qwen_messages(goal, list(frame_history[-N_HISTORY:]))
-        text_input = proc.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
-        )
-        inputs = proc(
-            text=[text_input],
-            images=frames_pil,
-            return_tensors="pt",
-            padding=True,
-        ).to(DEVICE)
-
-        # Tokenise the target plan
         target_ids = proc.tokenizer(
             plan_text, return_tensors="pt", add_special_tokens=False
         )["input_ids"].to(DEVICE)
 
-        # Full sequence: prompt + plan
-        full_ids = torch.cat(
-            [inputs["input_ids"], target_ids], dim=1
-        )
+        full_ids = torch.cat([inputs["input_ids"], target_ids], dim=1)
 
         with torch.cuda.amp.autocast(dtype=DTYPE):
             logits = qwen(
@@ -118,13 +127,11 @@ def _grpo_step(
                 image_grid_thw=inputs.get("image_grid_thw"),
             ).logits
 
-        # Log-probs over the plan tokens only
-        plan_logits = logits[0, inputs["input_ids"].shape[1] - 1: -1]
-        log_p = torch.nn.functional.log_softmax(plan_logits, dim=-1)
-        token_log_probs = log_p.gather(1, target_ids[0].unsqueeze(1)).squeeze(1)
-        seq_log_prob = token_log_probs.sum()
+        plan_logits      = logits[0, inputs["input_ids"].shape[1] - 1: -1]
+        log_p            = torch.nn.functional.log_softmax(plan_logits, dim=-1)
+        token_log_probs  = log_p.gather(1, target_ids[0].unsqueeze(1)).squeeze(1)
+        seq_log_prob     = token_log_probs.sum()
 
-        # GRPO loss: maximise log_prob * advantage  (negate for minimisation)
         total_loss = total_loss - seq_log_prob * float(adv)
 
     total_loss = total_loss / k
@@ -134,30 +141,44 @@ def _grpo_step(
     optimizer.step()
 
     return {
-        "rewards":    rewards.tolist(),
-        "mean_reward": float(r_mean),
-        "advantages": advantages.tolist(),
-        "loss":       float(total_loss.item()),
-        "plans":      plans,
-        "step1s":     step1s,
+        "rewards":      rewards.tolist(),
+        "mean_reward":  float(r_mean),
+        "advantages":   advantages.tolist(),
+        "loss":         float(total_loss.item()),
+        "plans":        plans,
+        "step1s":       step1s,
     }
 
 
-def train(n_steps: int, k_samples: int, lr: float, output_path: Path):
+def train(
+    n_steps: int,
+    k_samples: int,
+    lr: float,
+    prompt_variant: str,
+    output_path: Path,
+):
     load_vlm2()
     load_vlm3()
 
+    messages_fn = VARIANTS[prompt_variant]
+    print(f"Prompt variant: {prompt_variant}")
+
+    # Wrap Qwen with LoRA — only adapter weights will be updated
     from models import _qwen_model as qwen
+    import models as M
+    M._qwen_model = _apply_lora(qwen)
+
+    from models import _qwen_model as qwen_lora
     optimizer = torch.optim.AdamW(
-        [p for p in qwen.parameters() if p.requires_grad],
+        [p for p in qwen_lora.parameters() if p.requires_grad],
         lr=lr,
     )
 
-    log = []
+    log  = []
     step = 0
     episode_iter = iter_episodes("train", max_episodes=n_steps * 4, seed=0)
 
-    print(f"GRPO training: {n_steps} steps, K={k_samples}, lr={lr}")
+    print(f"GRPO training: {n_steps} steps · K={k_samples} · lr={lr}")
 
     for goal, frames, actions in episode_iter:
         if step >= n_steps:
@@ -167,16 +188,16 @@ def train(n_steps: int, k_samples: int, lr: float, output_path: Path):
         if T <= N_HISTORY:
             continue
 
-        # Pick a random mid-episode timestep
         rng = np.random.default_rng(step)
         t   = int(rng.integers(N_HISTORY, T))
 
-        history    = list(frames[max(0, t - N_HISTORY):t])
-        current    = frames[t]
-        gt_action  = actions[t]
+        history   = list(frames[max(0, t - N_HISTORY):t])
+        current   = frames[t]
+        gt_action = actions[t]
 
         result = _grpo_step(
-            goal, history, current, gt_action, optimizer, k=k_samples
+            goal, history, current, gt_action, optimizer,
+            messages_fn=messages_fn, k=k_samples,
         )
         result["step"] = step
         result["goal"] = goal
@@ -188,15 +209,14 @@ def train(n_steps: int, k_samples: int, lr: float, output_path: Path):
             f"rewards=[{', '.join(f'{r:.3f}' for r in result['rewards'])}]"
         )
 
-        # Save checkpoint every 100 steps
+        # Checkpoint every 100 steps (save LoRA adapters only — ~60 MB vs 14 GB)
         if (step + 1) % 100 == 0:
-            ckpt = RESULTS_DIR / f"qwen_grpo_step{step+1}"
+            ckpt = RESULTS_DIR / f"qwen_lora_step{step + 1}"
             from models import _qwen_processor as proc
-            qwen.save_pretrained(ckpt)
+            qwen_lora.save_pretrained(ckpt)
             proc.save_pretrained(ckpt)
             print(f"  Checkpoint saved: {ckpt}")
 
-        # Incremental log
         with open(output_path, "w") as f:
             json.dump(log, f, indent=2)
 
@@ -207,10 +227,12 @@ def train(n_steps: int, k_samples: int, lr: float, output_path: Path):
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("--steps",     type=int,   default=1000)
-    ap.add_argument("--k_samples", type=int,   default=K_SAMPLES)
-    ap.add_argument("--lr",        type=float, default=1e-5)
-    ap.add_argument("--output",    type=Path,
+    ap.add_argument("--steps",          type=int,   default=1000)
+    ap.add_argument("--k_samples",      type=int,   default=K_SAMPLES)
+    ap.add_argument("--lr",             type=float, default=3e-4)
+    ap.add_argument("--prompt_variant", type=str,   default="D_fewshot",
+                    choices=list(VARIANTS.keys()))
+    ap.add_argument("--output",         type=Path,
                     default=RESULTS_DIR / "grpo_log.json")
     args = ap.parse_args()
-    train(args.steps, args.k_samples, args.lr, args.output)
+    train(args.steps, args.k_samples, args.lr, args.prompt_variant, args.output)
