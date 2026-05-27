@@ -138,14 +138,16 @@ def load_vlm3():
     # on every child. OpenVLA's custom VisionTransformer doesn't define it.
     # Patch smart_apply to silently skip modules that lack _initialize_weights.
     from transformers.modeling_utils import PreTrainedModel
-    if hasattr(PreTrainedModel, 'smart_apply'):
-        _orig_smart_apply = PreTrainedModel.smart_apply
-        def _safe_smart_apply(self, fn):
-            try:
-                return _orig_smart_apply(self, fn)
-            except AttributeError:
-                pass
-        PreTrainedModel.smart_apply = _safe_smart_apply
+    # OpenVLA's VisionTransformer doesn't define _initialize_weights.
+    # Patch initialize_weights (called during from_pretrained for missing keys)
+    # to swallow the AttributeError rather than crashing.
+    _orig_init_weights = PreTrainedModel.initialize_weights
+    def _safe_init_weights(self, *args, **kwargs):
+        try:
+            return _orig_init_weights(self, *args, **kwargs)
+        except AttributeError:
+            pass
+    PreTrainedModel.initialize_weights = _safe_init_weights
 
     from transformers import AutoModelForVision2Seq, AutoProcessor
     print(f"Loading VLM₃: {VLM3_MODEL_ID}")
