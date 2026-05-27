@@ -13,7 +13,7 @@ from PIL import Image
 # ── Config ─────────────────────────────────────────────────────────────────────
 
 VLM2_MODEL_ID = "Qwen/Qwen2.5-VL-7B-Instruct"
-VLM3_MODEL_ID = "openvla/openvla-7b-oft"
+VLM3_MODEL_ID = "openvla/openvla-7b"
 UNNORM_KEY    = "bridge_orig"
 DEVICE        = "cuda"
 DTYPE         = torch.bfloat16
