@@ -1,0 +1,216 @@
+"""
+GRPO training: tune VLM₂ (Qwen2.5-VL-7B) using VLM₃ (OpenVLA-OFT) as reward.
+
+For each training step:
+  1. Sample a Bridge episode and a random timestep
+  2. Feed last 4 frames + goal to Qwen K=8 times (temperature sampling) → K plans
+  3. For each plan, pass step 1 to OpenVLA-OFT → predicted action
+  4. Reward = -L2(predicted, GT)  for each of the K samples
+  5. Normalise rewards within the group (GRPO)
+  6. Policy gradient update on Qwen
+
+Run:
+  python grpo_train.py [--steps 1000] [--k_samples 8] [--lr 1e-5]
+"""
+
+import argparse
+import json
+import numpy as np
+import torch
+from pathlib import Path
+
+from bridge_loader import iter_episodes
+from models import (
+    plan_vlm2, predict_vlm3,
+    load_vlm2, load_vlm3,
+    _qwen_model, _qwen_processor,
+    N_HISTORY, N_PLAN_STEPS,
+    DEVICE, DTYPE, VLM2_MODEL_ID,
+)
+
+RESULTS_DIR = Path(__file__).parent / "results"
+RESULTS_DIR.mkdir(exist_ok=True)
+
+K_SAMPLES   = 8      # GRPO group size
+TEMPERATURE = 1.0    # sampling temperature for GRPO rollouts
+EPS_CLIP    = 0.2    # PPO-style clip for GRPO
+
+
+def _grpo_step(
+    goal: str,
+    frame_history: list,
+    current_frame,
+    gt_action: np.ndarray,
+    optimizer: torch.optim.Optimizer,
+    k: int = K_SAMPLES,
+) -> dict:
+    """
+    Single GRPO update step.
+    Returns a dict with per-sample rewards and the policy loss.
+    """
+    import models as M
+
+    # ── 1. Reference log-probs (no grad) ──────────────────────────────────────
+    # We use the current policy as its own reference (simplified GRPO without
+    # a frozen ref model). This is appropriate for early training stages.
+
+    # ── 2. Sample K plans from Qwen ───────────────────────────────────────────
+    plans, step1s, log_probs = [], [], []
+
+    for _ in range(k):
+        full_text, step1 = plan_vlm2(
+            goal, frame_history, do_sample=True, temperature=TEMPERATURE
+        )
+        plans.append(full_text)
+        step1s.append(step1)
+
+    # ── 3. Compute rewards via VLM₃ ───────────────────────────────────────────
+    rewards = np.array([
+        -float(np.linalg.norm(predict_vlm3(s, current_frame) - gt_action))
+        for s in step1s
+    ], dtype=np.float32)
+
+    # ── 4. GRPO normalisation ─────────────────────────────────────────────────
+    r_mean = rewards.mean()
+    r_std  = rewards.std() + 1e-8
+    advantages = (rewards - r_mean) / r_std   # shape (K,)
+
+    # ── 5. Policy gradient loss ───────────────────────────────────────────────
+    # Re-compute log-probs of each sampled plan under current policy
+    # so we get a differentiable loss.
+    loss = torch.tensor(0.0, device=DEVICE, requires_grad=True)
+    load_vlm2()   # ensure loaded
+
+    from models import _qwen_model as qwen, _qwen_processor as proc
+    from models import _build_qwen_messages
+    from PIL import Image as PILImage
+
+    total_loss = torch.zeros(1, device=DEVICE)
+
+    for plan_text, adv in zip(plans, advantages):
+        frames_pil = [PILImage.fromarray(f) for f in frame_history[-N_HISTORY:]]
+        messages   = _build_qwen_messages(goal, list(frame_history[-N_HISTORY:]))
+        text_input = proc.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True
+        )
+        inputs = proc(
+            text=[text_input],
+            images=frames_pil,
+            return_tensors="pt",
+            padding=True,
+        ).to(DEVICE)
+
+        # Tokenise the target plan
+        target_ids = proc.tokenizer(
+            plan_text, return_tensors="pt", add_special_tokens=False
+        )["input_ids"].to(DEVICE)
+
+        # Full sequence: prompt + plan
+        full_ids = torch.cat(
+            [inputs["input_ids"], target_ids], dim=1
+        )
+
+        with torch.cuda.amp.autocast(dtype=DTYPE):
+            logits = qwen(
+                input_ids=full_ids,
+                attention_mask=torch.ones_like(full_ids),
+                pixel_values=inputs.get("pixel_values"),
+                image_grid_thw=inputs.get("image_grid_thw"),
+            ).logits
+
+        # Log-probs over the plan tokens only
+        plan_logits = logits[0, inputs["input_ids"].shape[1] - 1: -1]
+        log_p = torch.nn.functional.log_softmax(plan_logits, dim=-1)
+        token_log_probs = log_p.gather(1, target_ids[0].unsqueeze(1)).squeeze(1)
+        seq_log_prob = token_log_probs.sum()
+
+        # GRPO loss: maximise log_prob * advantage  (negate for minimisation)
+        total_loss = total_loss - seq_log_prob * float(adv)
+
+    total_loss = total_loss / k
+    optimizer.zero_grad()
+    total_loss.backward()
+    torch.nn.utils.clip_grad_norm_(qwen.parameters(), 1.0)
+    optimizer.step()
+
+    return {
+        "rewards":    rewards.tolist(),
+        "mean_reward": float(r_mean),
+        "advantages": advantages.tolist(),
+        "loss":       float(total_loss.item()),
+        "plans":      plans,
+        "step1s":     step1s,
+    }
+
+
+def train(n_steps: int, k_samples: int, lr: float, output_path: Path):
+    load_vlm2()
+    load_vlm3()
+
+    from models import _qwen_model as qwen
+    optimizer = torch.optim.AdamW(
+        [p for p in qwen.parameters() if p.requires_grad],
+        lr=lr,
+    )
+
+    log = []
+    step = 0
+    episode_iter = iter_episodes("train", max_episodes=n_steps * 4, seed=0)
+
+    print(f"GRPO training: {n_steps} steps, K={k_samples}, lr={lr}")
+
+    for goal, frames, actions in episode_iter:
+        if step >= n_steps:
+            break
+
+        T = len(frames)
+        if T <= N_HISTORY:
+            continue
+
+        # Pick a random mid-episode timestep
+        rng = np.random.default_rng(step)
+        t   = int(rng.integers(N_HISTORY, T))
+
+        history    = list(frames[max(0, t - N_HISTORY):t])
+        current    = frames[t]
+        gt_action  = actions[t]
+
+        result = _grpo_step(
+            goal, history, current, gt_action, optimizer, k=k_samples
+        )
+        result["step"] = step
+        result["goal"] = goal
+        log.append(result)
+
+        print(
+            f"Step {step:4d} | mean_reward={result['mean_reward']:+.4f} | "
+            f"loss={result['loss']:.4f} | "
+            f"rewards=[{', '.join(f'{r:.3f}' for r in result['rewards'])}]"
+        )
+
+        # Save checkpoint every 100 steps
+        if (step + 1) % 100 == 0:
+            ckpt = RESULTS_DIR / f"qwen_grpo_step{step+1}"
+            from models import _qwen_processor as proc
+            qwen.save_pretrained(ckpt)
+            proc.save_pretrained(ckpt)
+            print(f"  Checkpoint saved: {ckpt}")
+
+        # Incremental log
+        with open(output_path, "w") as f:
+            json.dump(log, f, indent=2)
+
+        step += 1
+
+    print(f"\nTraining done. Log: {output_path}")
+
+
+if __name__ == "__main__":
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--steps",     type=int,   default=1000)
+    ap.add_argument("--k_samples", type=int,   default=K_SAMPLES)
+    ap.add_argument("--lr",        type=float, default=1e-5)
+    ap.add_argument("--output",    type=Path,
+                    default=RESULTS_DIR / "grpo_log.json")
+    args = ap.parse_args()
+    train(args.steps, args.k_samples, args.lr, args.output)

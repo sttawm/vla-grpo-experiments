@@ -1,0 +1,25 @@
+# Core ML
+torch>=2.2.0
+torchvision>=0.17.0
+
+# HuggingFace
+transformers>=4.45.0
+accelerate>=0.30.0
+peft>=0.10.0
+
+# Qwen2.5-VL dependencies
+qwen-vl-utils>=0.0.8
+
+# OpenVLA-OFT (install from source if not on PyPI)
+# pip install git+https://github.com/openvla/openvla.git
+
+# Bridge dataset (TFRecord)
+tensorflow>=2.15.0
+tensorflow-datasets>=4.9.0
+
+# Image / numeric
+Pillow>=10.0.0
+numpy>=1.26.0
+
+# Plotting
+matplotlib>=3.8.0
