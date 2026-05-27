@@ -30,10 +30,15 @@ def load_vlm2():
     global _qwen_model, _qwen_processor
     if _qwen_model is not None:
         return
-    from transformers import Qwen2VLForConditionalGeneration, AutoProcessor
-    print(f"Loading VLM₂: {VLM2_MODEL_ID}")
+    from transformers import AutoProcessor
+    # Qwen2.5-VL uses Qwen2_5_VLForConditionalGeneration (transformers >= 4.52)
+    try:
+        from transformers import Qwen2_5_VLForConditionalGeneration as QwenCls
+    except ImportError:
+        from transformers import Qwen2VLForConditionalGeneration as QwenCls
+    print(f"Loading VLM₂: {VLM2_MODEL_ID} with {QwenCls.__name__}")
     _qwen_processor = AutoProcessor.from_pretrained(VLM2_MODEL_ID)
-    _qwen_model = Qwen2VLForConditionalGeneration.from_pretrained(
+    _qwen_model = QwenCls.from_pretrained(
         VLM2_MODEL_ID,
         torch_dtype=DTYPE,
         device_map=DEVICE,
