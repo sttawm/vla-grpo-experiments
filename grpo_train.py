@@ -141,6 +141,7 @@ def _grpo_step(
     return {
         "rewards":     rewards.tolist(),
         "mean_reward": float(r_mean),
+        "reward_std":  float(r_std - 1e-8),   # pre-normalization std; ~0 = no RL signal
         "advantages":  advantages.tolist(),
         "loss":        float(total_loss.item()),
         "plans":       plans,
@@ -191,6 +192,7 @@ def train(n_steps: int, k_samples: int, lr: float, output_path: Path):
 
         print(
             f"Step {step:4d} | mean_reward={result['mean_reward']:+.4f} | "
+            f"reward_std={result['reward_std']:.4f} | "
             f"loss={result['loss']:.4f} | "
             f"rewards=[{', '.join(f'{r:.3f}' for r in result['rewards'])}]"
         )
