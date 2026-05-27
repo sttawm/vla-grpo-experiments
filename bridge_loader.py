@@ -27,52 +27,36 @@ def _shard_uri(split: str, shard_idx: int) -> str:
 
 def _parse_episode(raw: bytes):
     """
-    Bridge RLDS TFRecords are stored as tf.train.Example (not SequenceExample).
-    Each record is one episode; step-level data is packed as flat lists.
+    Bridge stores each episode as a SequenceExample with all step data packed
+    as flat lists in context features.
 
-    Candidate field names (probe_schema.py will confirm which are present):
-      goal  : 'language_instruction'  |  'steps/language_instruction'
-      images: 'steps/observation/image_0'  |  'steps/observation/image'
-      actions: 'steps/action'
+    Confirmed field names (from probe_schema.py):
+      goal    : steps/observation/natural_language_instruction  (bytes, T values, all same)
+      images  : steps/observation/image                         (bytes, T PNG-encoded frames)
+      actions : steps/action/world_vector   (float, T*3) +
+                steps/action/rotation_delta (float, T*3) +
+                steps/action/open_gripper   (int64, T)   → concatenated to (T, 7)
     """
-    ex = tf.train.Example()
+    ex = tf.train.SequenceExample()
     ex.ParseFromString(raw)
-    f = ex.features.feature
+    f = ex.context.feature
 
-    # ── goal ──────────────────────────────────────────────────────────────────
-    for key in ("language_instruction",
-                "steps/language_instruction",
-                "episode_metadata/language_instruction"):
-        if key in f and f[key].bytes_list.value:
-            goal = f[key].bytes_list.value[0].decode(errors="replace")
-            break
-    else:
-        goal = ""
+    # ── goal (same string repeated T times — take first) ─────────────────────
+    goal = f["steps/observation/natural_language_instruction"].bytes_list.value[0].decode(errors="replace").strip()
 
     # ── images ────────────────────────────────────────────────────────────────
-    for key in ("steps/observation/image_0",
-                "steps/observation/image",
-                "observation/image_0"):
-        if key in f and f[key].bytes_list.value:
-            img_bytes = f[key].bytes_list.value
-            break
-    else:
-        raise KeyError("No image field found in episode record")
-
+    img_bytes = f["steps/observation/image"].bytes_list.value
     frames = np.stack([
         np.array(Image.open(io.BytesIO(b)).convert("RGB"))
         for b in img_bytes
     ])  # (T, H, W, 3)
 
-    # ── actions ───────────────────────────────────────────────────────────────
-    n_steps = len(img_bytes)
-    for key in ("steps/action", "action"):
-        if key in f and f[key].float_list.value:
-            act_list = list(f[key].float_list.value)
-            actions = np.array(act_list, dtype=np.float32).reshape(n_steps, -1)
-            break
-    else:
-        raise KeyError("No action field found in episode record")
+    # ── actions: xyz + rpy + gripper → (T, 7) ────────────────────────────────
+    T = len(img_bytes)
+    xyz     = np.array(f["steps/action/world_vector"].float_list.value,   dtype=np.float32).reshape(T, 3)
+    rpy     = np.array(f["steps/action/rotation_delta"].float_list.value, dtype=np.float32).reshape(T, 3)
+    gripper = np.array(f["steps/action/open_gripper"].int64_list.value,   dtype=np.float32).reshape(T, 1)
+    actions = np.concatenate([xyz, rpy, gripper], axis=1)  # (T, 7)
 
     return goal, frames, actions
 
