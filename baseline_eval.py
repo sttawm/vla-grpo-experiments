@@ -86,10 +86,14 @@ def evaluate(n_episodes: int, stride: int, output_path: Path):
         }
         results.append(entry)
 
-        cum_mean = float(np.mean(ep_means))
+        cum_mean     = float(np.mean(ep_means))
+        window       = ep_means[-20:]
+        rolling_mean = float(np.mean(window))
+        rolling_std  = float(np.std(window))
         print(
-            f"Ep {ep_idx:3d} | {T:3d} steps | mean L2={mean_l2:.4f} | "
-            f"cumulative mean={cum_mean:.4f} | {goal[:50]!r}"
+            f"Ep {ep_idx:3d} | {T:3d} steps | L2={mean_l2:.4f} | "
+            f"roll-20={rolling_mean:.4f}±{rolling_std:.4f} | "
+            f"cum={cum_mean:.4f} | {goal[:40]!r}"
         )
 
         # Incremental save
@@ -104,14 +108,32 @@ def evaluate(n_episodes: int, stride: int, output_path: Path):
     print(f"Results: {output_path}")
 
 
+ROLLING_WINDOW = 20
+
+
 def _plot_convergence(ep_means: list[float], out_path: Path):
-    n = len(ep_means)
+    n   = len(ep_means)
+    xs  = range(1, n + 1)
     cum = np.cumsum(ep_means) / np.arange(1, n + 1)
 
-    fig, ax = plt.subplots(figsize=(9, 4))
-    ax.plot(range(1, n + 1), ep_means,   alpha=0.35, color="steelblue", label="per-episode L2")
-    ax.plot(range(1, n + 1), cum,         color="steelblue",  lw=2,     label="cumulative mean")
-    ax.axhline(cum[-1], ls="--", color="gray", lw=1)
+    # Rolling mean + ±1 std band
+    roll_mean, roll_lo, roll_hi = [], [], []
+    for i in range(n):
+        w = ep_means[max(0, i - ROLLING_WINDOW + 1): i + 1]
+        m, s = float(np.mean(w)), float(np.std(w))
+        roll_mean.append(m)
+        roll_lo.append(m - s)
+        roll_hi.append(m + s)
+
+    fig, ax = plt.subplots(figsize=(10, 4))
+    ax.plot(xs, ep_means,  alpha=0.2, color="steelblue", lw=1)
+    ax.fill_between(xs, roll_lo, roll_hi, alpha=0.15, color="steelblue")
+    ax.plot(xs, roll_mean, color="steelblue", lw=2,
+            label=f"rolling mean (n={ROLLING_WINDOW})")
+    ax.plot(xs, cum,       color="navy",      lw=1.5, ls="--",
+            label="cumulative mean")
+    ax.axhline(cum[-1], ls=":", color="gray", lw=1)
+
     ax.set_xlabel("Episodes evaluated")
     ax.set_ylabel("Mean L2  (7-DoF action space)")
     ax.set_title("Baseline: Qwen2.5-VL-7B → OpenVLA-OFT  |  Bridge test set")
