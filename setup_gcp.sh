@@ -21,6 +21,8 @@ gcloud compute instances create "$VM" \
     --image-project="$IMAGE_PROJECT" \
     --boot-disk-size=200GB \
     --maintenance-policy=TERMINATE \
+    --provisioning-model=SPOT \
+    --instance-termination-action=STOP \
     --scopes=cloud-platform \
     --metadata="install-nvidia-driver=True"
 
@@ -42,7 +44,11 @@ echo "  gcloud compute ssh $VM --zone=$ZONE --project=$PROJECT"
 echo ""
 echo "Then run:"
 echo "  cd experiments"
-echo "  python probe_schema.py                    # verify Bridge field names"
-echo "  python baseline_eval.py                   # ~200 episodes, ~3 hr"
-echo "  python test_prompts.py --n_episodes 5     # pick best prompt variant"
-echo "  python grpo_train.py --steps 1000 --prompt_variant D_fewshot"
+echo "  python probe_schema.py        # verify Bridge field names first"
+echo "  python baseline_eval.py       # ~200 episodes, ~3 hr — run in tmux"
+echo ""
+echo "After baseline completes:"
+echo "  python grpo_train.py --steps 1000"
+echo ""
+echo "Note: spot instance may be preempted. Both scripts are resumable."
+echo "If preempted, restart the instance and re-run — results are saved incrementally."
