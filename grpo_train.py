@@ -104,7 +104,7 @@ def _grpo_step(
     for _ in range(k):
         full_text, step1 = plan_vlm2(
             goal, frame_history,
-            do_sample=True, temperature=TEMPERATURE,
+            n_steps=1, do_sample=True, temperature=TEMPERATURE,
         )
         plans.append(full_text)
         step1s.append(step1)
