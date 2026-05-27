@@ -182,7 +182,40 @@ def predict_vlm3(label: str, frame: np.ndarray) -> np.ndarray:
 
 # ── Reward ─────────────────────────────────────────────────────────────────────
 
-def compute_reward(label: str, frame: np.ndarray, gt_action: np.ndarray) -> float:
-    """Negative L₂ distance between VLM₃'s prediction and the GT action."""
+def _action_std() -> np.ndarray:
+    """Per-dimension std from Bridge dataset (used to normalize L2)."""
+    load_vlm3()
+    try:
+        stats = _openvla_model.norm_stats["bridge_orig"]["action"]
+        std = np.array(stats["std"], dtype=np.float32)
+        # Guard against zero std (e.g. constant gripper dim in some splits)
+        std = np.where(std < 1e-6, 1.0, std)
+        return std
+    except (KeyError, AttributeError):
+        # Fallback: empirical Bridge bridge_orig stds (xyz ~0.02m, rpy ~0.08rad, gripper ~0.5)
+        return np.array([0.02, 0.02, 0.02, 0.08, 0.08, 0.08, 0.5], dtype=np.float32)
+
+
+def compute_reward(
+    label: str,
+    frame: np.ndarray,
+    gt_action: np.ndarray,
+    normalized: bool = True,
+) -> tuple[float, np.ndarray, np.ndarray]:
+    """
+    Returns (reward, pred_action, per_dim_l2).
+
+    reward       — negative normalized L2 (each dim divided by its Bridge std)
+    pred_action  — raw 7-DoF prediction from VLM₃  (shape: 7,)
+    per_dim_l2   — |pred - gt| per dimension        (shape: 7,)
+
+    normalized=False falls back to raw (unnormalized) L2 for backward compat.
+    """
     pred = predict_vlm3(label, frame)
-    return -float(np.linalg.norm(pred - gt_action))
+    per_dim = np.abs(pred - gt_action).astype(np.float32)
+    if normalized:
+        std = _action_std()
+        reward = -float(np.linalg.norm(per_dim / std))
+    else:
+        reward = -float(np.linalg.norm(per_dim))
+    return reward, pred, per_dim

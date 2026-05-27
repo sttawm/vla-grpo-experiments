@@ -20,7 +20,7 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 
 from bridge_loader import iter_episodes
-from models import plan_vlm2, predict_vlm3, load_vlm2, load_vlm3
+from models import plan_vlm2, load_vlm2, load_vlm3, compute_reward
 
 RESULTS_DIR = Path(__file__).parent / "results"
 RESULTS_DIR.mkdir(exist_ok=True)
@@ -66,30 +66,47 @@ def evaluate(n_episodes: int, stride: int, output_path: Path):
             gt_action   = actions[t]
 
             full_plan, step1 = plan_vlm2(goal, history)
-            pred_action      = predict_vlm3(step1, current)
-            l2               = float(np.linalg.norm(pred_action - gt_action))
+            reward, pred_action, per_dim = compute_reward(step1, current, gt_action)
+            l2_norm = -reward  # positive, normalized
+            l2_raw  = float(np.linalg.norm(pred_action - gt_action))
 
-            ep_l2s.append(l2)
-            plans.append({"t": t, "plan": full_plan, "step1": step1, "l2": l2})
+            ep_l2s.append(l2_norm)
+            plans.append({
+                "t":        t,
+                "plan":     full_plan,
+                "step1":    step1,
+                "l2_norm":  l2_norm,
+                "l2_raw":   l2_raw,
+                "per_dim":  per_dim.tolist(),   # [dx, dy, dz, drx, dry, drz, dgrip]
+                "pred":     pred_action.tolist(),
+                "gt":       gt_action.tolist(),
+            })
 
         mean_l2 = float(np.mean(ep_l2s))
         ep_means.append(mean_l2)
 
+        # Per-dim mean absolute error across timesteps
+        all_per_dim = np.array([p["per_dim"] for p in plans])  # (n_t, 7)
+        mean_per_dim = all_per_dim.mean(axis=0).tolist()
+
         entry = {
-            "episode_idx": ep_idx,
-            "goal":        goal,
-            "n_steps":     T,
-            "timesteps":   timesteps,
-            "mean_l2":     mean_l2,
-            "std_l2":      float(np.std(ep_l2s)),
-            "plans":       plans,
+            "episode_idx":  ep_idx,
+            "goal":         goal,
+            "n_steps":      T,
+            "timesteps":    timesteps,
+            "mean_l2":      mean_l2,   # normalized L2 (primary metric)
+            "std_l2":       float(np.std(ep_l2s)),
+            "mean_per_dim": mean_per_dim,  # [dx, dy, dz, drx, dry, drz, dgrip]
+            "plans":        plans,
         }
         results.append(entry)
 
         cum_mean = float(np.mean(ep_means))
+        dim_labels = ["dx", "dy", "dz", "drx", "dry", "drz", "grip"]
+        dim_str = " ".join(f"{l}={v:.3f}" for l, v in zip(dim_labels, mean_per_dim))
         print(
-            f"Ep {ep_idx:3d} | {T:3d} steps | L2={mean_l2:.4f} | "
-            f"cumulative mean={cum_mean:.4f} | {goal[:50]!r}"
+            f"Ep {ep_idx:3d} | {T:3d} steps | L2(norm)={mean_l2:.4f} | "
+            f"cum={cum_mean:.4f} | {dim_str} | {goal[:40]!r}"
         )
 
         # Incremental save
@@ -115,7 +132,7 @@ def _plot_convergence(ep_means: list[float], out_path: Path):
     ax.axhline(cum[-1], ls="--", color="gray", lw=1)
 
     ax.set_xlabel("Episodes evaluated")
-    ax.set_ylabel("Mean L2  (7-DoF action space)")
+    ax.set_ylabel("Mean normalized L2  (per-dim / Bridge std)")
     ax.set_title("Baseline: Qwen2.5-VL-7B → OpenVLA-OFT  |  Bridge test set")
     ax.legend()
     ax.set_xlim(1, max(n, 2))

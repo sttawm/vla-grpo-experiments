@@ -22,7 +22,7 @@ from peft import get_peft_model, LoraConfig, TaskType
 
 from bridge_loader import iter_episodes
 from models import (
-    plan_vlm2, predict_vlm3,
+    plan_vlm2, compute_reward,
     load_vlm2, load_vlm3,
     N_HISTORY, DEVICE, DTYPE,
 )
@@ -80,9 +80,9 @@ def _grpo_step(
         plans.append(full_text)
         step1s.append(step1)
 
-    # ── 2. Compute rewards via VLM₃ ───────────────────────────────────────────
+    # ── 2. Compute rewards via VLM₃ (normalized L2: each dim / Bridge std) ─────
     rewards = np.array([
-        -float(np.linalg.norm(predict_vlm3(s, current_frame) - gt_action))
+        compute_reward(s, current_frame, gt_action)[0]   # (reward, pred, per_dim)
         for s in step1s
     ], dtype=np.float32)
 
