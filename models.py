@@ -19,7 +19,6 @@ DEVICE        = "cuda"
 DTYPE         = torch.bfloat16
 
 N_HISTORY     = 4   # number of past frames Qwen sees
-N_PLAN_STEPS  = 4   # Qwen outputs a plan of this many steps
 
 # ── VLM₂: Qwen planner ────────────────────────────────────────────────────────
 
@@ -54,13 +53,13 @@ def _build_qwen_messages(goal: str, frames: list[np.ndarray]) -> list[dict]:
     text_content = {
         "type": "text",
         "text": (
-            f"You are controlling a robot arm.\n"
-            f"Goal: {goal}\n\n"
+            f"You are controlling a robot arm. Goal: {goal}\n\n"
             f"The {len(frames)} image(s) above show the robot's recent state "
             f"(oldest → newest).\n\n"
-            f"Output a {N_PLAN_STEPS}-step plan for what the robot should do next. "
-            f"Be concise (5–10 words per step). Format exactly:\n"
-            f"1. [action]\n2. [action]\n3. [action]\n4. [action]"
+            f"Based on the images, what are the next two things the robot arm "
+            f"should do over the next 1–10 seconds?\n\n"
+            f"1. [action]\n"
+            f"2. [action]"
         ),
     }
     return [{"role": "user", "content": image_content + [text_content]}]
@@ -71,19 +70,14 @@ def plan_vlm2(
     frame_history: list[np.ndarray],
     do_sample: bool = False,
     temperature: float = 1.0,
-    messages_fn=None,
 ) -> tuple[str, str]:
     """
-    Generate a plan from Qwen and return (full_plan_text, step_1_label).
-    frame_history : list of up to N_HISTORY frames (numpy uint8 RGB).
-    messages_fn   : optional callable (goal, frames) -> chat messages list.
-                    Defaults to _build_qwen_messages (prompt variant A).
+    Generate a 2-step plan from Qwen and return (full_plan_text, step_1_label).
+    frame_history: list of up to N_HISTORY frames (numpy uint8 RGB).
     """
     load_vlm2()
-    frames = list(frame_history[-N_HISTORY:])
-    if messages_fn is None:
-        messages_fn = _build_qwen_messages
-    messages = messages_fn(goal, frames)
+    frames   = list(frame_history[-N_HISTORY:])
+    messages = _build_qwen_messages(goal, frames)
 
     text_input   = _qwen_processor.apply_chat_template(
         messages, tokenize=False, add_generation_prompt=True
@@ -97,7 +91,7 @@ def plan_vlm2(
         padding=True,
     ).to(DEVICE)
 
-    gen_kwargs = dict(max_new_tokens=200, do_sample=do_sample)
+    gen_kwargs = dict(max_new_tokens=60, do_sample=do_sample)
     if do_sample:
         gen_kwargs["temperature"] = temperature
 

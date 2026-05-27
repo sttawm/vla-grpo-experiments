@@ -3,16 +3,14 @@ GRPO training: tune VLM₂ (Qwen2.5-VL-7B) with LoRA using VLM₃ (OpenVLA-OFT) 
 
 For each training step:
   1. Sample a Bridge episode and a random timestep
-  2. Feed last 4 frames + goal to Qwen K=8 times (temperature sampling) → K plans
+  2. Feed last 4 frames + goal to Qwen K=8 times (temperature sampling) → K 2-step plans
   3. For each plan, pass step 1 + current frame to OpenVLA-OFT → predicted action
   4. Reward = -L2(predicted, GT) for each of the K samples
   5. Normalise rewards within the group (GRPO)
   6. Policy gradient update on LoRA adapters only
 
 Run:
-  python grpo_train.py [--steps 1000] [--k_samples 8] [--lr 3e-4] [--prompt_variant D_fewshot]
-
-Run test_prompts.py first to choose the best --prompt_variant for your setup.
+  python grpo_train.py [--steps 1000] [--k_samples 8] [--lr 3e-4]
 """
 
 import argparse
@@ -28,7 +26,6 @@ from models import (
     load_vlm2, load_vlm3,
     N_HISTORY, DEVICE, DTYPE,
 )
-from prompt_variants import VARIANTS
 
 RESULTS_DIR = Path(__file__).parent / "results"
 RESULTS_DIR.mkdir(exist_ok=True)
@@ -67,7 +64,6 @@ def _grpo_step(
     current_frame,
     gt_action: np.ndarray,
     optimizer: torch.optim.Optimizer,
-    messages_fn,
     k: int = K_SAMPLES,
 ) -> dict:
     from models import _qwen_model as qwen, _qwen_processor as proc
@@ -80,7 +76,6 @@ def _grpo_step(
         full_text, step1 = plan_vlm2(
             goal, frame_history,
             do_sample=True, temperature=TEMPERATURE,
-            messages_fn=messages_fn,
         )
         plans.append(full_text)
         step1s.append(step1)
@@ -99,7 +94,7 @@ def _grpo_step(
     # ── 4. Policy gradient loss over LoRA adapters ────────────────────────────
     frames_use = list(frame_history[-N_HISTORY:])
     frames_pil = [PILImage.fromarray(f) for f in frames_use]
-    messages   = messages_fn(goal, frames_use)
+    messages   = _build_qwen_messages(goal, frames_use)
     text_input = proc.apply_chat_template(
         messages, tokenize=False, add_generation_prompt=True
     )
@@ -150,18 +145,9 @@ def _grpo_step(
     }
 
 
-def train(
-    n_steps: int,
-    k_samples: int,
-    lr: float,
-    prompt_variant: str,
-    output_path: Path,
-):
+def train(n_steps: int, k_samples: int, lr: float, output_path: Path):
     load_vlm2()
     load_vlm3()
-
-    messages_fn = VARIANTS[prompt_variant]
-    print(f"Prompt variant: {prompt_variant}")
 
     # Wrap Qwen with LoRA — only adapter weights will be updated
     from models import _qwen_model as qwen
@@ -195,10 +181,7 @@ def train(
         current   = frames[t]
         gt_action = actions[t]
 
-        result = _grpo_step(
-            goal, history, current, gt_action, optimizer,
-            messages_fn=messages_fn, k=k_samples,
-        )
+        result = _grpo_step(goal, history, current, gt_action, optimizer, k=k_samples)
         result["step"] = step
         result["goal"] = goal
         log.append(result)
@@ -227,12 +210,9 @@ def train(
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("--steps",          type=int,   default=1000)
-    ap.add_argument("--k_samples",      type=int,   default=K_SAMPLES)
-    ap.add_argument("--lr",             type=float, default=3e-4)
-    ap.add_argument("--prompt_variant", type=str,   default="D_fewshot",
-                    choices=list(VARIANTS.keys()))
-    ap.add_argument("--output",         type=Path,
-                    default=RESULTS_DIR / "grpo_log.json")
+    ap.add_argument("--steps",     type=int,   default=1000)
+    ap.add_argument("--k_samples", type=int,   default=K_SAMPLES)
+    ap.add_argument("--lr",        type=float, default=3e-4)
+    ap.add_argument("--output",    type=Path,  default=RESULTS_DIR / "grpo_log.json")
     args = ap.parse_args()
-    train(args.steps, args.k_samples, args.lr, args.prompt_variant, args.output)
+    train(args.steps, args.k_samples, args.lr, args.output)
