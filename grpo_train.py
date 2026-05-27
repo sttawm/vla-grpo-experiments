@@ -58,6 +58,24 @@ def _apply_lora(model):
     return model
 
 
+def _seq_log_prob(qwen, proc, inputs, plan_text: str) -> torch.Tensor:
+    """Log probability of plan_text tokens given the prompt context."""
+    target_ids = proc.tokenizer(
+        plan_text, return_tensors="pt", add_special_tokens=False
+    )["input_ids"].to(DEVICE)
+    full_ids = torch.cat([inputs["input_ids"], target_ids], dim=1)
+    with torch.cuda.amp.autocast(dtype=DTYPE):
+        logits = qwen(
+            input_ids=full_ids,
+            attention_mask=torch.ones_like(full_ids),
+            pixel_values=inputs.get("pixel_values"),
+            image_grid_thw=inputs.get("image_grid_thw"),
+        ).logits
+    plan_logits = logits[0, inputs["input_ids"].shape[1] - 1:-1]
+    log_p = torch.nn.functional.log_softmax(plan_logits, dim=-1)
+    return log_p.gather(1, target_ids[0].unsqueeze(1)).squeeze(1).sum()
+
+
 def _grpo_step(
     goal: str,
     frame_history: list,
@@ -70,28 +88,6 @@ def _grpo_step(
     from models import _build_qwen_messages
     from PIL import Image as PILImage
 
-    # ── 1. Sample K plans ─────────────────────────────────────────────────────
-    plans, step1s = [], []
-    for _ in range(k):
-        full_text, step1 = plan_vlm2(
-            goal, frame_history,
-            do_sample=True, temperature=TEMPERATURE,
-        )
-        plans.append(full_text)
-        step1s.append(step1)
-
-    # ── 2. Compute rewards via VLM₃ (normalized L2: each dim / Bridge std) ─────
-    rewards = np.array([
-        compute_reward(goal, current_frame, gt_action, label=s)[0]
-        for s in step1s
-    ], dtype=np.float32)
-
-    # ── 3. GRPO normalisation ─────────────────────────────────────────────────
-    r_mean     = rewards.mean()
-    r_std      = rewards.std() + 1e-8
-    advantages = (rewards - r_mean) / r_std
-
-    # ── 4. Policy gradient loss over LoRA adapters ────────────────────────────
     frames_use = list(frame_history[-N_HISTORY:])
     frames_pil = [PILImage.fromarray(f) for f in frames_use]
     messages   = _build_qwen_messages(goal, frames_use)
@@ -99,35 +95,42 @@ def _grpo_step(
         messages, tokenize=False, add_generation_prompt=True
     )
     inputs = proc(
-        text=[text_input],
-        images=frames_pil,
-        return_tensors="pt",
-        padding=True,
+        text=[text_input], images=frames_pil,
+        return_tensors="pt", padding=True,
     ).to(DEVICE)
 
+    # ── 1. Sample K plans + record old log probs (reference policy, no grad) ──
+    plans, step1s, old_log_probs = [], [], []
+    for _ in range(k):
+        full_text, step1 = plan_vlm2(
+            goal, frame_history,
+            do_sample=True, temperature=TEMPERATURE,
+        )
+        plans.append(full_text)
+        step1s.append(step1)
+        with torch.no_grad():
+            old_lp = _seq_log_prob(qwen, proc, inputs, full_text)
+        old_log_probs.append(old_lp.detach())
+
+    # ── 2. Rewards + group-relative advantages ────────────────────────────────
+    rewards = np.array([
+        compute_reward(goal, current_frame, gt_action, label=s)[0]
+        for s in step1s
+    ], dtype=np.float32)
+    r_mean     = rewards.mean()
+    r_std      = rewards.std() + 1e-8
+    advantages = (rewards - r_mean) / r_std
+
+    # ── 3. PPO-clipped loss ───────────────────────────────────────────────────
     total_loss = torch.zeros(1, device=DEVICE)
-
-    for plan_text, adv in zip(plans, advantages):
-        target_ids = proc.tokenizer(
-            plan_text, return_tensors="pt", add_special_tokens=False
-        )["input_ids"].to(DEVICE)
-
-        full_ids = torch.cat([inputs["input_ids"], target_ids], dim=1)
-
-        with torch.cuda.amp.autocast(dtype=DTYPE):
-            logits = qwen(
-                input_ids=full_ids,
-                attention_mask=torch.ones_like(full_ids),
-                pixel_values=inputs.get("pixel_values"),
-                image_grid_thw=inputs.get("image_grid_thw"),
-            ).logits
-
-        plan_logits      = logits[0, inputs["input_ids"].shape[1] - 1: -1]
-        log_p            = torch.nn.functional.log_softmax(plan_logits, dim=-1)
-        token_log_probs  = log_p.gather(1, target_ids[0].unsqueeze(1)).squeeze(1)
-        seq_log_prob     = token_log_probs.sum()
-
-        total_loss = total_loss - seq_log_prob * float(adv)
+    for plan_text, adv, old_lp in zip(plans, advantages, old_log_probs):
+        new_lp  = _seq_log_prob(qwen, proc, inputs, plan_text)
+        ratio   = torch.exp(new_lp - old_lp)
+        adv_t   = torch.tensor(float(adv), device=DEVICE)
+        clipped = torch.clamp(ratio, 1 - EPS_CLIP, 1 + EPS_CLIP)
+        # Take the more conservative (min) of clipped and unclipped objectives
+        loss    = -torch.min(ratio * adv_t, clipped * adv_t)
+        total_loss = total_loss + loss
 
     total_loss = total_loss / k
     optimizer.zero_grad()
@@ -136,12 +139,12 @@ def _grpo_step(
     optimizer.step()
 
     return {
-        "rewards":      rewards.tolist(),
-        "mean_reward":  float(r_mean),
-        "advantages":   advantages.tolist(),
-        "loss":         float(total_loss.item()),
-        "plans":        plans,
-        "step1s":       step1s,
+        "rewards":     rewards.tolist(),
+        "mean_reward": float(r_mean),
+        "advantages":  advantages.tolist(),
+        "loss":        float(total_loss.item()),
+        "plans":       plans,
+        "step1s":      step1s,
     }
 
 
