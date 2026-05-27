@@ -3,7 +3,7 @@ GRPO training: tune VLM₂ (Qwen2.5-VL-7B) with LoRA using VLM₃ (OpenVLA-OFT) 
 
 For each training step:
   1. Sample a Bridge episode and a random timestep
-  2. Feed last 4 frames + goal to Qwen K=8 times (temperature sampling) → K 2-step plans
+  2. Feed last 4 frames + goal to Qwen K=8 times (temperature sampling) → K 1-step plans
   3. For each plan, pass step 1 + current frame to OpenVLA-OFT → predicted action
   4. Reward = -L2(predicted, GT) for each of the K samples
   5. Normalise rewards within the group (GRPO)
@@ -90,7 +90,7 @@ def _grpo_step(
 
     frames_use = list(frame_history[-N_HISTORY:])
     frames_pil = [PILImage.fromarray(f) for f in frames_use]
-    messages   = _build_qwen_messages(goal, frames_use)
+    messages   = _build_qwen_messages(goal, frames_use, n_steps=1)
     text_input = proc.apply_chat_template(
         messages, tokenize=False, add_generation_prompt=True
     )
