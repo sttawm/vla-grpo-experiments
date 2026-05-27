@@ -25,17 +25,10 @@ gcloud compute instances create "$VM" \
     --metadata="install-nvidia-driver=True"
 
 echo ""
-echo "=== Uploading experiment files ==="
-gcloud compute scp --recurse \
-    "$(dirname "$0")" \
-    "$VM:~/experiments" \
-    --zone="$ZONE" \
-    --project="$PROJECT"
-
-echo ""
-echo "=== Installing dependencies ==="
+echo "=== Cloning repo and installing dependencies ==="
 gcloud compute ssh "$VM" --zone="$ZONE" --project="$PROJECT" -- bash -s <<'REMOTE'
 set -euo pipefail
+git clone https://github.com/sttawm/vla-grpo-experiments.git ~/experiments
 cd ~/experiments
 pip install -r requirements.txt
 # OpenVLA-OFT from source (not on PyPI)
