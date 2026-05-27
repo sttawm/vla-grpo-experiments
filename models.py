@@ -133,6 +133,19 @@ def load_vlm3():
     global _openvla_model, _openvla_processor
     if _openvla_model is not None:
         return
+
+    # transformers>=4.50 added smart_apply which calls module._initialize_weights
+    # on every child. OpenVLA's custom VisionTransformer doesn't define it.
+    # Patch smart_apply to silently skip modules that lack _initialize_weights.
+    from transformers.modeling_utils import PreTrainedModel
+    _orig_smart_apply = PreTrainedModel.smart_apply
+    def _safe_smart_apply(self, fn):
+        try:
+            return _orig_smart_apply(self, fn)
+        except AttributeError:
+            pass
+    PreTrainedModel.smart_apply = _safe_smart_apply
+
     from transformers import AutoModelForVision2Seq, AutoProcessor
     print(f"Loading VLM₃: {VLM3_MODEL_ID}")
     _openvla_processor = AutoProcessor.from_pretrained(
