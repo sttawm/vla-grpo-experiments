@@ -53,11 +53,12 @@ def _build_qwen_messages(goal: str, frames: list[np.ndarray]) -> list[dict]:
     text_content = {
         "type": "text",
         "text": (
-            f"You are controlling a robot arm. Goal: {goal}\n\n"
+            f"You are controlling a robot arm. The high-level goal is: {goal}\n\n"
             f"The {len(frames)} image(s) above show the robot's recent state "
             f"(oldest → newest).\n\n"
-            f"Based on the images, what are the next two things the robot arm "
-            f"should do over the next 1–10 seconds?\n\n"
+            f"What are the next two immediate actions for the robot arm? "
+            f"Be more specific and lower-level than the goal — describe the "
+            f"exact physical movement.\n\n"
             f"1. [action]\n"
             f"2. [action]"
         ),
