@@ -1,16 +1,20 @@
 """
-Baseline evaluation: Qwen2.5-VL-7B (VLM₂, frozen) → OpenVLA-OFT (VLM₃, frozen).
+Baseline evaluation — two modes:
 
-For each Bridge test episode:
-  - At each sampled timestep, feed last 4 frames + goal to Qwen → 4-step plan
-  - Pass step 1 + current frame to OpenVLA-OFT → predicted action
-  - L2(predicted, GT) is the reward signal we will later optimise with GRPO
+  vla_only      OpenVLA receives the high-level goal directly (no Qwen).
+                Prompt: "In: What action should the robot take to {goal}?\nOut:"
 
-Results saved incrementally to results/baseline.json.
-Plot of cumulative mean L2 vs episodes saved to results/baseline_l2.png.
+  vla_midlevel  Qwen generates a mid-level label; OpenVLA receives both.
+                Prompt: "In: What action should the robot take to {label}
+                         in order to {goal}?\nOut:"
+
+Results saved incrementally; both modes write separate JSON files so they can
+be run in any order and compared side-by-side.
 
 Run:
-  python baseline_eval.py [--n_episodes 200] [--stride 4] [--output results/baseline.json]
+  python baseline_eval.py --mode vla_only
+  python baseline_eval.py --mode vla_midlevel
+  python baseline_eval.py --mode vla_only --n_episodes 200 --stride 4
 """
 
 import argparse
@@ -20,21 +24,26 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 
 from bridge_loader import iter_episodes
-from models import plan_vlm2, load_vlm2, load_vlm3, compute_reward
+from models import plan_vlm2, load_vlm2, load_vlm3, compute_reward, N_HISTORY
 
 RESULTS_DIR = Path(__file__).parent / "results"
 RESULTS_DIR.mkdir(exist_ok=True)
 
+MODES = ("vla_only", "vla_midlevel")
 
-def evaluate(n_episodes: int, stride: int, output_path: Path):
-    # Load both models up front so per-step timing is clean
-    load_vlm2()
+
+def evaluate(mode: str, n_episodes: int, stride: int, output_path: Path):
+    if mode not in MODES:
+        raise ValueError(f"mode must be one of {MODES}")
+
+    # Only load Qwen when needed
+    if mode == "vla_midlevel":
+        load_vlm2()
     load_vlm3()
 
     results  = []
-    ep_means = []   # mean L2 per episode (for convergence plot)
+    ep_means = []
 
-    # Resume if partial results exist
     if output_path.exists():
         with open(output_path) as f:
             results = json.load(f)
@@ -50,43 +59,46 @@ def evaluate(n_episodes: int, stride: int, output_path: Path):
             continue
 
         T = len(frames)
-        # Sample timesteps at the given stride, skip the first N_HISTORY steps
-        # so we always have a full frame history
-        from models import N_HISTORY
         timesteps = list(range(N_HISTORY, T, stride))
         if not timesteps:
             continue
 
         ep_l2s = []
-        plans   = []
+        steps  = []
 
         for t in timesteps:
-            history     = list(frames[max(0, t - N_HISTORY):t])
-            current     = frames[t]
-            gt_action   = actions[t]
+            history   = list(frames[max(0, t - N_HISTORY):t])
+            current   = frames[t]
+            gt_action = actions[t]
 
-            full_plan, step1 = plan_vlm2(goal, history)
-            reward, pred_action, per_dim = compute_reward(step1, current, gt_action)
-            l2_norm = -reward  # positive, normalized
+            if mode == "vla_midlevel":
+                full_plan, label = plan_vlm2(goal, history)
+            else:
+                full_plan, label = None, None
+
+            reward, pred_action, per_dim = compute_reward(
+                goal, current, gt_action, label=label
+            )
+            l2_norm = -reward
             l2_raw  = float(np.linalg.norm(pred_action - gt_action))
 
+            step = {
+                "t":       t,
+                "l2_norm": l2_norm,
+                "l2_raw":  l2_raw,
+                "per_dim": per_dim.tolist(),
+                "pred":    pred_action.tolist(),
+                "gt":      gt_action.tolist(),
+            }
+            if mode == "vla_midlevel":
+                step["plan"]  = full_plan
+                step["label"] = label
             ep_l2s.append(l2_norm)
-            plans.append({
-                "t":        t,
-                "plan":     full_plan,
-                "step1":    step1,
-                "l2_norm":  l2_norm,
-                "l2_raw":   l2_raw,
-                "per_dim":  per_dim.tolist(),   # [dx, dy, dz, drx, dry, drz, dgrip]
-                "pred":     pred_action.tolist(),
-                "gt":       gt_action.tolist(),
-            })
+            steps.append(step)
 
-        mean_l2 = float(np.mean(ep_l2s))
+        mean_l2      = float(np.mean(ep_l2s))
         ep_means.append(mean_l2)
-
-        # Per-dim mean absolute error across timesteps
-        all_per_dim = np.array([p["per_dim"] for p in plans])  # (n_t, 7)
+        all_per_dim  = np.array([s["per_dim"] for s in steps])
         mean_per_dim = all_per_dim.mean(axis=0).tolist()
 
         entry = {
@@ -94,46 +106,48 @@ def evaluate(n_episodes: int, stride: int, output_path: Path):
             "goal":         goal,
             "n_steps":      T,
             "timesteps":    timesteps,
-            "mean_l2":      mean_l2,   # normalized L2 (primary metric)
+            "mean_l2":      mean_l2,
             "std_l2":       float(np.std(ep_l2s)),
-            "mean_per_dim": mean_per_dim,  # [dx, dy, dz, drx, dry, drz, dgrip]
-            "plans":        plans,
+            "mean_per_dim": mean_per_dim,
+            "steps":        steps,
         }
         results.append(entry)
 
-        cum_mean = float(np.mean(ep_means))
+        cum_mean   = float(np.mean(ep_means))
         dim_labels = ["dx", "dy", "dz", "drx", "dry", "drz", "grip"]
-        dim_str = " ".join(f"{l}={v:.3f}" for l, v in zip(dim_labels, mean_per_dim))
+        dim_str    = " ".join(f"{l}={v:.3f}" for l, v in zip(dim_labels, mean_per_dim))
         print(
-            f"Ep {ep_idx:3d} | {T:3d} steps | L2(norm)={mean_l2:.4f} | "
-            f"cum={cum_mean:.4f} | {dim_str} | {goal[:40]!r}"
+            f"[{mode}] Ep {ep_idx:3d} | {T:3d} steps | "
+            f"L2(norm)={mean_l2:.4f} | cum={cum_mean:.4f} | "
+            f"{dim_str} | {goal[:40]!r}"
         )
 
-        # Incremental save
         with open(output_path, "w") as f:
             json.dump(results, f, indent=2)
 
-        # Re-plot after every episode so you can watch convergence live
-        _plot_convergence(ep_means, output_path.parent / "baseline_l2.png")
+        _plot_convergence(ep_means, output_path.with_suffix(".png"), mode)
 
     print(f"\nDone. {len(results)} episodes evaluated.")
     print(f"Overall mean L2: {np.mean(ep_means):.4f} ± {np.std(ep_means):.4f}")
     print(f"Results: {output_path}")
 
 
-def _plot_convergence(ep_means: list[float], out_path: Path):
+def _plot_convergence(ep_means: list[float], out_path: Path, mode: str):
     n   = len(ep_means)
     xs  = range(1, n + 1)
     cum = np.cumsum(ep_means) / np.arange(1, n + 1)
 
+    color = "steelblue" if mode == "vla_midlevel" else "darkorange"
+    label_str = "VLA + mid-level (Qwen)" if mode == "vla_midlevel" else "VLA only"
+
     fig, ax = plt.subplots(figsize=(10, 4))
-    ax.plot(xs, ep_means, alpha=0.25, color="steelblue", lw=1, label="per-episode L2")
-    ax.plot(xs, cum, color="steelblue", lw=2.5, label="cumulative mean")
+    ax.plot(xs, ep_means, alpha=0.25, color=color, lw=1, label=f"{label_str} per-episode")
+    ax.plot(xs, cum, color=color, lw=2.5, label=f"{label_str} cumulative mean")
     ax.axhline(cum[-1], ls="--", color="gray", lw=1)
 
     ax.set_xlabel("Episodes evaluated")
     ax.set_ylabel("Mean normalized L2  (per-dim / Bridge std)")
-    ax.set_title("Baseline: Qwen2.5-VL-7B → OpenVLA-OFT  |  Bridge test set")
+    ax.set_title(f"Baseline [{label_str}]  |  Bridge test set  |  OpenVLA-7B")
     ax.legend()
     ax.set_xlim(1, max(n, 2))
     ax.set_ylim(bottom=0)
@@ -144,10 +158,15 @@ def _plot_convergence(ep_means: list[float], out_path: Path):
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
+    ap.add_argument("--mode", choices=MODES, required=True,
+                    help="vla_only: goal→OpenVLA; vla_midlevel: goal+Qwen label→OpenVLA")
     ap.add_argument("--n_episodes", type=int, default=200)
-    ap.add_argument("--stride",     type=int, default=4,
-                    help="Evaluate every Nth timestep within each episode")
-    ap.add_argument("--output",     type=Path,
-                    default=RESULTS_DIR / "baseline.json")
+    ap.add_argument("--stride",     type=int, default=4)
+    ap.add_argument("--output",     type=Path, default=None,
+                    help="Override output path (default: results/baseline_{mode}.json)")
     args = ap.parse_args()
-    evaluate(args.n_episodes, args.stride, args.output)
+
+    if args.output is None:
+        args.output = RESULTS_DIR / f"baseline_{args.mode}.json"
+
+    evaluate(args.mode, args.n_episodes, args.stride, args.output)

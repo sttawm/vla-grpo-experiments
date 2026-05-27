@@ -164,13 +164,20 @@ def load_vlm3():
     print(f"VLM₃ ready. Action dim: {_openvla_model.get_action_dim(UNNORM_KEY)} DoF")
 
 
-def predict_vlm3(label: str, frame: np.ndarray) -> np.ndarray:
+def predict_vlm3(goal: str, frame: np.ndarray, label: str = None) -> np.ndarray:
     """
-    Given a mid-level label and the current frame, return a 7-DoF action vector.
-    Uses greedy decoding (do_sample=False) for a deterministic reward signal.
+    Return a 7-DoF action vector from OpenVLA.
+
+    goal:  high-level task description (always provided; matches Bridge training dist.)
+    label: mid-level action from Qwen (optional).
+           - None  → VLA-only prompt:  "...take to {goal}?"
+           - set   → combined prompt:  "...take to {label} in order to {goal}?"
     """
     load_vlm3()
-    prompt = f"In: What action should the robot take to {label}?\nOut:"
+    if label is not None:
+        prompt = f"In: What action should the robot take to {label} in order to {goal}?\nOut:"
+    else:
+        prompt = f"In: What action should the robot take to {goal}?\nOut:"
     image  = Image.fromarray(frame)
     inputs = _openvla_processor(prompt, image).to(DEVICE, dtype=DTYPE)
     with torch.no_grad():
@@ -197,9 +204,10 @@ def _action_std() -> np.ndarray:
 
 
 def compute_reward(
-    label: str,
+    goal: str,
     frame: np.ndarray,
     gt_action: np.ndarray,
+    label: str = None,
     normalized: bool = True,
 ) -> tuple[float, np.ndarray, np.ndarray]:
     """
@@ -209,9 +217,11 @@ def compute_reward(
     pred_action  — raw 7-DoF prediction from VLM₃  (shape: 7,)
     per_dim_l2   — |pred - gt| per dimension        (shape: 7,)
 
+    label=None   → VLA-only mode (goal passed directly to OpenVLA)
+    label=str    → VLA+mid-level mode (label + goal passed to OpenVLA)
     normalized=False falls back to raw (unnormalized) L2 for backward compat.
     """
-    pred = predict_vlm3(label, frame)
+    pred = predict_vlm3(goal, frame, label)
     per_dim = np.abs(pred - gt_action).astype(np.float32)
     if normalized:
         std = _action_std()

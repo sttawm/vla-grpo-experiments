@@ -82,7 +82,7 @@ def _grpo_step(
 
     # ── 2. Compute rewards via VLM₃ (normalized L2: each dim / Bridge std) ─────
     rewards = np.array([
-        compute_reward(s, current_frame, gt_action)[0]   # (reward, pred, per_dim)
+        compute_reward(goal, current_frame, gt_action, label=s)[0]
         for s in step1s
     ], dtype=np.float32)
 
