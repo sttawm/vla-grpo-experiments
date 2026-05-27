@@ -47,25 +47,38 @@ def load_vlm2():
     print("VLM₂ ready.")
 
 
-def _build_qwen_messages(goal: str, frames: list[np.ndarray]) -> list[dict]:
+def _build_qwen_messages(goal: str, frames: list[np.ndarray], n_steps: int = 2) -> list[dict]:
     """
     Build the Qwen chat message with interleaved images (last N frames) and text.
     frames: list of numpy RGB arrays, ordered oldest → newest.
+    n_steps: how many immediate actions to request (1, 2, or 4).
     """
     image_content = [
         {"type": "image", "image": Image.fromarray(f)} for f in frames
     ]
+    if n_steps == 1:
+        action_prompt = (
+            f"What is the next immediate action for the robot arm? "
+            f"Be more specific and lower-level than the goal — describe the "
+            f"exact physical movement.\n\n"
+            f"1. [action]"
+        )
+    else:
+        steps_word = {2: "two", 4: "four"}.get(n_steps, str(n_steps))
+        numbered = "\n".join(f"{i+1}. [action]" for i in range(n_steps))
+        action_prompt = (
+            f"What are the next {steps_word} immediate actions for the robot arm? "
+            f"Be more specific and lower-level than the goal — describe the "
+            f"exact physical movement.\n\n"
+            f"{numbered}"
+        )
     text_content = {
         "type": "text",
         "text": (
             f"You are controlling a robot arm. The high-level goal is: {goal}\n\n"
             f"The {len(frames)} image(s) above show the robot's recent state "
             f"(oldest → newest).\n\n"
-            f"What are the next two immediate actions for the robot arm? "
-            f"Be more specific and lower-level than the goal — describe the "
-            f"exact physical movement.\n\n"
-            f"1. [action]\n"
-            f"2. [action]"
+            f"{action_prompt}"
         ),
     }
     return [{"role": "user", "content": image_content + [text_content]}]
@@ -74,16 +87,18 @@ def _build_qwen_messages(goal: str, frames: list[np.ndarray]) -> list[dict]:
 def plan_vlm2(
     goal: str,
     frame_history: list[np.ndarray],
+    n_steps: int = 2,
     do_sample: bool = False,
     temperature: float = 1.0,
 ) -> tuple[str, str]:
     """
-    Generate a 2-step plan from Qwen and return (full_plan_text, step_1_label).
+    Generate a plan from Qwen and return (full_plan_text, step_1_label).
     frame_history: list of up to N_HISTORY frames (numpy uint8 RGB).
+    n_steps: number of steps to request from Qwen (only step 1 is used as label).
     """
     load_vlm2()
     frames   = list(frame_history[-N_HISTORY:])
-    messages = _build_qwen_messages(goal, frames)
+    messages = _build_qwen_messages(goal, frames, n_steps=n_steps)
 
     text_input   = _qwen_processor.apply_chat_template(
         messages, tokenize=False, add_generation_prompt=True

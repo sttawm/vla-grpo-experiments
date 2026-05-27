@@ -32,7 +32,7 @@ RESULTS_DIR.mkdir(exist_ok=True)
 MODES = ("vla_only", "vla_midlevel")
 
 
-def evaluate(mode: str, n_episodes: int, stride: int, output_path: Path):
+def evaluate(mode: str, n_episodes: int, stride: int, output_path: Path, n_steps: int = 2):
     if mode not in MODES:
         raise ValueError(f"mode must be one of {MODES}")
 
@@ -72,7 +72,7 @@ def evaluate(mode: str, n_episodes: int, stride: int, output_path: Path):
             gt_action = actions[t]
 
             if mode == "vla_midlevel":
-                full_plan, label = plan_vlm2(goal, history)
+                full_plan, label = plan_vlm2(goal, history, n_steps=n_steps)
             else:
                 full_plan, label = None, None
 
@@ -116,8 +116,9 @@ def evaluate(mode: str, n_episodes: int, stride: int, output_path: Path):
         cum_mean   = float(np.mean(ep_means))
         dim_labels = ["dx", "dy", "dz", "drx", "dry", "drz", "grip"]
         dim_str    = " ".join(f"{l}={v:.3f}" for l, v in zip(dim_labels, mean_per_dim))
+        mode_tag   = mode if mode == "vla_only" else f"{mode}(n={n_steps})"
         print(
-            f"[{mode}] Ep {ep_idx:3d} | {T:3d} steps | "
+            f"[{mode_tag}] Ep {ep_idx:3d} | {T:3d} steps | "
             f"L2(norm)={mean_l2:.4f} | cum={cum_mean:.4f} | "
             f"{dim_str} | {goal[:40]!r}"
         )
@@ -162,11 +163,16 @@ if __name__ == "__main__":
                     help="vla_only: goal→OpenVLA; vla_midlevel: goal+Qwen label→OpenVLA")
     ap.add_argument("--n_episodes", type=int, default=200)
     ap.add_argument("--stride",     type=int, default=4)
+    ap.add_argument("--n_steps",    type=int, default=2, choices=[1, 2, 4],
+                    help="Number of steps to request from Qwen (vla_midlevel only)")
     ap.add_argument("--output",     type=Path, default=None,
-                    help="Override output path (default: results/baseline_{mode}.json)")
+                    help="Override output path (default: results/baseline_{mode}_{n_steps}step.json)")
     args = ap.parse_args()
 
     if args.output is None:
-        args.output = RESULTS_DIR / f"baseline_{args.mode}.json"
+        if args.mode == "vla_only":
+            args.output = RESULTS_DIR / "baseline_vla_only.json"
+        else:
+            args.output = RESULTS_DIR / f"baseline_vla_midlevel_{args.n_steps}step.json"
 
-    evaluate(args.mode, args.n_episodes, args.stride, args.output)
+    evaluate(args.mode, args.n_episodes, args.stride, args.output, n_steps=args.n_steps)
