@@ -34,6 +34,10 @@ K_SAMPLES   = 8
 TEMPERATURE = 1.0
 EPS_CLIP    = 0.2
 
+VAL_EPISODES = 50   # episodes from train split (seed=42 ≠ training seed=0)
+VAL_STRIDE   = 8    # timestep stride within each episode
+VAL_SEED     = 42
+
 # LoRA config — targets attention + FFN projections in the language model
 LORA_RANK    = 32
 LORA_ALPHA   = 64
@@ -42,6 +46,40 @@ LORA_TARGETS = [
     "q_proj", "k_proj", "v_proj", "o_proj",
     "gate_proj", "up_proj", "down_proj",
 ]
+
+
+def _val_eval(n_episodes: int = VAL_EPISODES, stride: int = VAL_STRIDE) -> dict:
+    """Greedy eval on a fixed held-out slice of Bridge train episodes."""
+    all_rewards: list[float] = []
+    ep_means:    list[float] = []
+
+    with torch.no_grad():
+        for goal, frames, actions in iter_episodes(
+            "train", max_episodes=n_episodes, seed=VAL_SEED
+        ):
+            T = len(frames)
+            timesteps = list(range(N_HISTORY, T, stride))
+            if not timesteps:
+                continue
+
+            ep_rewards = []
+            for t in timesteps:
+                history   = list(frames[max(0, t - N_HISTORY):t])
+                current   = frames[t]
+                gt_action = actions[t]
+
+                _, step1 = plan_vlm2(goal, history, n_steps=1, do_sample=False)
+                reward, _, _ = compute_reward(goal, current, gt_action, label=step1)
+                ep_rewards.append(float(reward))
+
+            ep_means.append(float(np.mean(ep_rewards)))
+            all_rewards.extend(ep_rewards)
+
+    return {
+        "val_mean_reward": float(np.mean(all_rewards)) if all_rewards else 0.0,
+        "val_std_reward":  float(np.std(all_rewards))  if all_rewards else 0.0,
+        "val_n_episodes":  len(ep_means),
+    }
 
 
 def _apply_lora(model):
@@ -201,13 +239,22 @@ def train(n_steps: int, k_samples: int, lr: float, output_path: Path):
             f"rewards=[{', '.join(f'{r:.3f}' for r in result['rewards'])}]"
         )
 
-        # Checkpoint every 100 steps (save LoRA adapters only — ~60 MB vs 14 GB)
+        # Checkpoint + val eval every 100 steps
         if (step + 1) % 100 == 0:
             ckpt = RESULTS_DIR / f"qwen_lora_step{step + 1}"
             from models import _qwen_processor as proc
             qwen_lora.save_pretrained(ckpt)
             proc.save_pretrained(ckpt)
             print(f"  Checkpoint saved: {ckpt}")
+
+            print(f"  Running val eval ({VAL_EPISODES} episodes, stride={VAL_STRIDE})...")
+            val = _val_eval()
+            result["val_mean_reward"] = val["val_mean_reward"]
+            result["val_std_reward"]  = val["val_std_reward"]
+            print(
+                f"  Val: mean_reward={val['val_mean_reward']:+.4f} ± "
+                f"{val['val_std_reward']:.4f}  ({val['val_n_episodes']} episodes)"
+            )
 
         with open(output_path, "w") as f:
             json.dump(log, f, indent=2)

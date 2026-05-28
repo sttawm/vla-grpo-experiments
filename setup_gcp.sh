@@ -8,7 +8,7 @@ PROJECT="emg2qwerty-team-shared"
 ZONE="us-central1-a"
 VM="vla-train"
 MACHINE="a2-highgpu-1g"   # 1× A100 40GB, 12 vCPUs, 85 GB RAM (LoRA fits comfortably)
-IMAGE_FAMILY="pytorch-latest-gpu"
+IMAGE_FAMILY="pytorch-2-9-cu129-ubuntu-2204-nvidia-580"
 IMAGE_PROJECT="deeplearning-platform-release"
 
 echo "=== Creating VM $VM in $PROJECT ($ZONE) ==="

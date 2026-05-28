@@ -56,14 +56,20 @@ def plot(log_path: Path, out_path: Path):
     reward_stds  = [d["reward_std"]  for d in data]
     losses       = [d["loss"]        for d in data]
 
+    # Val eval is logged only at checkpoint steps (every 100)
+    val_steps   = [d["step"] for d in data if "val_mean_reward" in d]
+    val_rewards = [d["val_mean_reward"] for d in data if "val_mean_reward" in d]
+
     roll_reward  = rolling(np.array(mean_rewards), WINDOW)
     roll_rstd    = rolling(np.array(reward_stds),  WINDOW)
     roll_loss    = rolling(np.array(losses),        WINDOW)
 
-    fig = plt.figure(figsize=(14, 9))
-    gs  = gridspec.GridSpec(2, 2, figure=fig, hspace=0.4, wspace=0.35)
+    has_val = len(val_steps) > 0
+    n_rows  = 3 if has_val else 2
+    fig = plt.figure(figsize=(14, 4 * n_rows))
+    gs  = gridspec.GridSpec(n_rows, 2, figure=fig, hspace=0.45, wspace=0.35)
 
-    # ── Top-left: cumulative mean reward + rolling avg ────────────────────────
+    # ── Row 0: training mean reward ───────────────────────────────────────────
     ax0 = fig.add_subplot(gs[0, :])
     ax0.plot(steps, mean_rewards, alpha=0.2, color="steelblue", lw=1, label="Per-step mean reward")
     ax0.plot(steps, roll_reward,  color="steelblue", lw=2.5,
@@ -71,12 +77,27 @@ def plot(log_path: Path, out_path: Path):
     ax0.axhline(np.nanmean(roll_reward[-WINDOW:]), ls="--", color="gray", lw=1)
     ax0.set_xlabel("Training step")
     ax0.set_ylabel("Mean reward  (−norm L2)")
-    ax0.set_title("GRPO training — mean reward per step")
+    ax0.set_title("GRPO training — mean reward per step  (temperature sampling)")
     ax0.legend(fontsize=9)
     ax0.set_xlim(left=0)
 
+    # ── Row 1 (if available): val mean reward (greedy, held-out train slice) ──
+    if has_val:
+        ax_val = fig.add_subplot(gs[1, :])
+        ax_val.plot(val_steps, val_rewards, color="mediumseagreen", lw=2,
+                    marker="o", ms=5, label="Val mean reward (greedy)")
+        ax_val.axhline(val_rewards[-1], ls="--", color="gray", lw=1)
+        ax_val.set_xlabel("Training step")
+        ax_val.set_ylabel("Mean reward  (−norm L2)")
+        ax_val.set_title("Validation reward — greedy decoding, held-out train episodes (seed=42)")
+        ax_val.legend(fontsize=9)
+        ax_val.set_xlim(left=0)
+        bot_row = 2
+    else:
+        bot_row = 1
+
     # ── Bottom-left: reward_std (RL signal strength) ──────────────────────────
-    ax1 = fig.add_subplot(gs[1, 0])
+    ax1 = fig.add_subplot(gs[bot_row, 0])
     ax1.plot(steps, reward_stds, alpha=0.2, color="darkorange", lw=1)
     ax1.plot(steps, roll_rstd,   color="darkorange", lw=2,
              label=f"{WINDOW}-step rolling avg")
@@ -88,7 +109,7 @@ def plot(log_path: Path, out_path: Path):
     ax1.set_ylim(bottom=0)
 
     # ── Bottom-right: loss ─────────────────────────────────────────────────────
-    ax2 = fig.add_subplot(gs[1, 1])
+    ax2 = fig.add_subplot(gs[bot_row, 1])
     ax2.plot(steps, losses,    alpha=0.2, color="crimson", lw=1)
     ax2.plot(steps, roll_loss, color="crimson", lw=2,
              label=f"{WINDOW}-step rolling avg")
@@ -99,10 +120,15 @@ def plot(log_path: Path, out_path: Path):
     ax2.set_xlim(left=0)
 
     n = len(steps)
+    val_suffix = (
+        f"  |  val reward: {val_rewards[-1]:+.4f}"
+        if has_val else ""
+    )
     fig.suptitle(
         f"GRPO  |  {n} steps  |  "
         f"recent mean reward: {np.nanmean(mean_rewards[-WINDOW:]):.4f}  |  "
-        f"recent reward_std: {np.nanmean(reward_stds[-WINDOW:]):.4f}",
+        f"recent reward_std: {np.nanmean(reward_stds[-WINDOW:]):.4f}"
+        f"{val_suffix}",
         fontsize=11, y=1.01,
     )
 
