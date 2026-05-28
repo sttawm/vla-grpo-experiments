@@ -54,6 +54,7 @@ def _apply_lora(model):
         bias="none",
     )
     model = get_peft_model(model, config)
+    model.gradient_checkpointing_enable()
     model.print_trainable_parameters()
     return model
 
@@ -121,20 +122,18 @@ def _grpo_step(
     r_std      = rewards.std() + 1e-8
     advantages = (rewards - r_mean) / r_std
 
-    # ── 3. PPO-clipped loss ───────────────────────────────────────────────────
-    total_loss = torch.zeros(1, device=DEVICE)
+    # ── 3. PPO-clipped loss — one backward per sample to avoid holding K graphs ─
+    optimizer.zero_grad()
+    total_loss_val = 0.0
     for plan_text, adv, old_lp in zip(plans, advantages, old_log_probs):
         new_lp  = _seq_log_prob(qwen, proc, inputs, plan_text)
         ratio   = torch.exp(new_lp - old_lp)
         adv_t   = torch.tensor(float(adv), device=DEVICE)
         clipped = torch.clamp(ratio, 1 - EPS_CLIP, 1 + EPS_CLIP)
-        # Take the more conservative (min) of clipped and unclipped objectives
-        loss    = -torch.min(ratio * adv_t, clipped * adv_t)
-        total_loss = total_loss + loss
+        loss    = -torch.min(ratio * adv_t, clipped * adv_t) / k
+        loss.backward()
+        total_loss_val += loss.item()
 
-    total_loss = total_loss / k
-    optimizer.zero_grad()
-    total_loss.backward()
     torch.nn.utils.clip_grad_norm_(qwen.parameters(), 1.0)
     optimizer.step()
 
@@ -143,7 +142,7 @@ def _grpo_step(
         "mean_reward": float(r_mean),
         "reward_std":  float(r_std - 1e-8),   # pre-normalization std; ~0 = no RL signal
         "advantages":  advantages.tolist(),
-        "loss":        float(total_loss.item()),
+        "loss":        total_loss_val,
         "plans":       plans,
         "step1s":      step1s,
     }
