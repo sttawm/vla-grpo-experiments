@@ -20,6 +20,20 @@ DTYPE         = torch.bfloat16
 
 N_HISTORY     = 4   # number of past frames Qwen sees
 
+# Diverse open-ended prompt phrasings for run 7+ (no abstraction locking)
+PROMPT_POOL = [
+    "Describe what the robot arm should do next to make progress toward the goal.",
+    "What should the robot arm do next?",
+    "What is the next action for the robot arm?",
+    "Describe the robot arm's next move.",
+    "What step should the robot take next to achieve the goal?",
+    "What motion should the robot arm perform next?",
+    "Describe the immediate next action the robot should take.",
+    "What should the robot do next to complete the task?",
+    "Describe the next movement the robot arm should make.",
+    "What action should the robot perform next toward the goal?",
+]
+
 # ── VLM₂: Qwen planner ────────────────────────────────────────────────────────
 
 _qwen_model     = None
@@ -47,16 +61,27 @@ def load_vlm2():
     print("VLM₂ ready.")
 
 
-def _build_qwen_messages(goal: str, frames: list[np.ndarray], n_steps: int = 2) -> list[dict]:
+def _build_qwen_messages(
+    goal: str,
+    frames: list[np.ndarray],
+    n_steps: int = 2,
+    prompt_variant: int | None = None,
+) -> list[dict]:
     """
     Build the Qwen chat message with interleaved images (last N frames) and text.
     frames: list of numpy RGB arrays, ordered oldest → newest.
     n_steps: how many immediate actions to request (1, 2, or 4).
+    prompt_variant: if set, use PROMPT_POOL[prompt_variant % len(PROMPT_POOL)] as the
+                    action instruction (open-ended); if None, use the locked low-level prompt.
     """
     image_content = [
         {"type": "image", "image": Image.fromarray(f)} for f in frames
     ]
-    if n_steps == 1:
+    if prompt_variant is not None:
+        phrasing = PROMPT_POOL[prompt_variant % len(PROMPT_POOL)]
+        numbered = "\n".join(f"{i+1}. [action]" for i in range(n_steps))
+        action_prompt = f"{phrasing}\n\n{numbered}"
+    elif n_steps == 1:
         action_prompt = (
             f"What is the next immediate action for the robot arm? "
             f"Be more specific and lower-level than the goal — describe the "
@@ -84,11 +109,15 @@ def _build_qwen_messages(goal: str, frames: list[np.ndarray], n_steps: int = 2) 
     return [{"role": "user", "content": image_content + [text_content]}]
 
 
-def _build_qwen_inputs(goal: str, frame_history: list[np.ndarray]):
+def _build_qwen_inputs(
+    goal: str,
+    frame_history: list[np.ndarray],
+    prompt_variant: int | None = None,
+):
     """Process images + text into model inputs. Separated so callers can reuse."""
     load_vlm2()
     frames = list(frame_history[-N_HISTORY:])
-    messages = _build_qwen_messages(goal, frames, n_steps=1)
+    messages = _build_qwen_messages(goal, frames, n_steps=1, prompt_variant=prompt_variant)
     text_input = _qwen_processor.apply_chat_template(
         messages, tokenize=False, add_generation_prompt=True
     )
@@ -107,13 +136,15 @@ def plan_vlm2(
     n_steps: int = 2,
     do_sample: bool = False,
     temperature: float = 1.0,
+    prompt_variant: int | None = None,
 ) -> tuple[str, str]:
     """
     Generate a plan from Qwen and return (full_plan_text, step_1_label).
     frame_history: list of up to N_HISTORY frames (numpy uint8 RGB).
     n_steps: number of steps to request from Qwen (only step 1 is used as label).
+    prompt_variant: if set, use open-ended prompt pool variant instead of locked prompt.
     """
-    inputs = _build_qwen_inputs(goal, frame_history)
+    inputs = _build_qwen_inputs(goal, frame_history, prompt_variant=prompt_variant)
     gen_kwargs = dict(max_new_tokens=60, do_sample=do_sample)
     if do_sample:
         gen_kwargs["temperature"] = temperature
@@ -130,12 +161,14 @@ def plan_vlm2_batch(
     k: int,
     do_sample: bool = True,
     temperature: float = 1.0,
+    prompt_variant: int | None = None,
 ) -> tuple[list[str], list[str], dict]:
     """
     Generate k plans in one batched generate call.
     Returns (full_texts, step1_labels, inputs) — inputs is reusable for log prob computation.
+    prompt_variant: if set, use open-ended prompt pool variant instead of locked prompt.
     """
-    inputs = _build_qwen_inputs(goal, frame_history)
+    inputs = _build_qwen_inputs(goal, frame_history, prompt_variant=prompt_variant)
     gen_kwargs = dict(max_new_tokens=60, do_sample=do_sample, num_return_sequences=k)
     if do_sample:
         gen_kwargs["temperature"] = temperature

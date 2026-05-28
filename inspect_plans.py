@@ -50,12 +50,13 @@ def _unload_lora():
         M._qwen_model.eval()
 
 
-def _generate_plans(goal, frames, k, temperature=0.8):
+def _generate_plans(goal, frames, k, temperature=0.8, prompt_variant=None):
     """Generate k plans and compute reward for each."""
     history = list(frames[-N_HISTORY:])
     with torch.no_grad():
         plan_texts, step1s, _ = plan_vlm2_batch(
-            goal, history, k=k, do_sample=True, temperature=temperature
+            goal, history, k=k, do_sample=True, temperature=temperature,
+            prompt_variant=prompt_variant,
         )
     return plan_texts, step1s
 
@@ -68,7 +69,7 @@ def _compute_rewards(goal, current_frame, gt_action, step1s):
     return rewards
 
 
-def inspect(ckpt_path: Path | None, n_episodes: int, k: int, seed: int, temperature: float):
+def inspect(ckpt_path: Path | None, n_episodes: int, k: int, seed: int, temperature: float, prompt_variant: int | None = None):
     INSPECT_DIR.mkdir(exist_ok=True)
     load_vlm2()
     load_vlm3()
@@ -97,8 +98,9 @@ def inspect(ckpt_path: Path | None, n_episodes: int, k: int, seed: int, temperat
         print(f"GT action: [{', '.join(f'{a:.3f}' for a in gt_action)}]")
 
         # ── Base model plans ──────────────────────────────────────────────────
-        print(f"\n  [BASE MODEL]  (K={k}, T={temperature})")
-        base_plans, base_step1s = _generate_plans(goal, history, k, temperature)
+        pv_str = f", prompt_variant={prompt_variant}" if prompt_variant is not None else ""
+        print(f"\n  [BASE MODEL]  (K={k}, T={temperature}{pv_str})")
+        base_plans, base_step1s = _generate_plans(goal, history, k, temperature, prompt_variant)
         base_rewards = _compute_rewards(goal, current, gt_action, base_step1s)
         for i, (plan, r) in enumerate(zip(base_step1s, base_rewards)):
             print(f"    {i+1}. reward={r:+.3f}  |  {plan}")
@@ -113,8 +115,8 @@ def inspect(ckpt_path: Path | None, n_episodes: int, k: int, seed: int, temperat
         # ── Fine-tuned model plans ────────────────────────────────────────────
         if ckpt_path is not None:
             _load_lora(ckpt_path)
-            print(f"\n  [FINE-TUNED: {ckpt_path.name}]  (K={k}, T={temperature})")
-            ft_plans, ft_step1s = _generate_plans(goal, history, k, temperature)
+            print(f"\n  [FINE-TUNED: {ckpt_path.name}]  (K={k}, T={temperature}{pv_str})")
+            ft_plans, ft_step1s = _generate_plans(goal, history, k, temperature, prompt_variant)
             ft_rewards = _compute_rewards(goal, current, gt_action, ft_step1s)
             for i, (plan, r) in enumerate(zip(ft_step1s, ft_rewards)):
                 print(f"    {i+1}. reward={r:+.3f}  |  {plan}")
@@ -157,7 +159,9 @@ if __name__ == "__main__":
     ap.add_argument("--k",           type=int,   default=8)
     ap.add_argument("--seed",        type=int,   default=99,
                     help="Episode seed (use something other than 0/42 to get fresh episodes)")
-    ap.add_argument("--temperature", type=float, default=0.8)
+    ap.add_argument("--temperature",    type=float, default=0.8)
+    ap.add_argument("--prompt_variant", type=int,   default=None,
+                    help="Use open-ended prompt pool variant N instead of locked prompt")
     args = ap.parse_args()
 
     ckpt = None if args.no_ckpt else args.ckpt
@@ -165,4 +169,4 @@ if __name__ == "__main__":
         print(f"Checkpoint not found: {ckpt}  (run with --no_ckpt to show base only)")
         raise SystemExit(1)
 
-    inspect(ckpt, args.n_episodes, args.k, args.seed, args.temperature)
+    inspect(ckpt, args.n_episodes, args.k, args.seed, args.temperature, args.prompt_variant)

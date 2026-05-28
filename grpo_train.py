@@ -100,8 +100,12 @@ def _apply_lora(model):
     return model
 
 
-def _seq_log_prob(qwen, proc, inputs, plan_text: str) -> torch.Tensor:
-    """Log probability of plan_text tokens given the prompt context."""
+def _seq_log_prob(qwen, proc, inputs, plan_text: str) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Returns (length-normalized log prob, mean per-position entropy) for plan_text.
+    Normalizing by token count prevents the model from gaming the PPO objective
+    by collapsing to shorter sequences with higher raw log prob.
+    """
     target_ids = proc.tokenizer(
         plan_text, return_tensors="pt", add_special_tokens=False
     )["input_ids"].to(DEVICE)
@@ -116,7 +120,11 @@ def _seq_log_prob(qwen, proc, inputs, plan_text: str) -> torch.Tensor:
     ).logits
     plan_logits = logits[0, inputs["input_ids"].shape[1] - 1:-1]
     log_p = torch.nn.functional.log_softmax(plan_logits, dim=-1)
-    return log_p.gather(1, target_ids[0].unsqueeze(1)).squeeze(1).sum()
+    n_tokens = target_ids.shape[1]
+    seq_log_prob = log_p.gather(1, target_ids[0].unsqueeze(1)).squeeze(1).sum() / n_tokens
+    # Entropy H = -E[log p], averaged over token positions
+    entropy = -(log_p.exp() * log_p).sum(dim=-1).mean()
+    return seq_log_prob, entropy
 
 
 def _grpo_step(
@@ -128,6 +136,8 @@ def _grpo_step(
     k: int = K_SAMPLES,
     clip_norm: float = 1.0,
     temperature: float = TEMPERATURE,
+    entropy_coef: float = 0.0,
+    prompt_variant: int | None = None,
 ) -> dict:
     from models import _qwen_model as qwen, _qwen_processor as proc
     from models import plan_vlm2_batch
@@ -135,11 +145,12 @@ def _grpo_step(
     # ── 1. Sample K plans in one batched call; reuse inputs for log probs ─────
     plans, step1s, inputs = plan_vlm2_batch(
         goal, frame_history, k=k, do_sample=True, temperature=temperature,
+        prompt_variant=prompt_variant,
     )
     old_log_probs = []
     with torch.no_grad():
         for plan_text in plans:
-            old_lp = _seq_log_prob(qwen, proc, inputs, plan_text)
+            old_lp, _ = _seq_log_prob(qwen, proc, inputs, plan_text)
             old_log_probs.append(old_lp.detach())
 
     # ── 2. Rewards: average over eval_frames with frozen plan label ───────────
@@ -158,11 +169,13 @@ def _grpo_step(
     optimizer.zero_grad()
     total_loss_val = 0.0
     for plan_text, adv, old_lp in zip(plans, advantages, old_log_probs):
-        new_lp  = _seq_log_prob(qwen, proc, inputs, plan_text)
+        new_lp, entropy = _seq_log_prob(qwen, proc, inputs, plan_text)
         ratio   = torch.exp(new_lp - old_lp)
         adv_t   = torch.tensor(float(adv), device=DEVICE)
         clipped = torch.clamp(ratio, 1 - EPS_CLIP, 1 + EPS_CLIP)
-        loss    = -torch.min(ratio * adv_t, clipped * adv_t) / k
+        ppo_loss = -torch.min(ratio * adv_t, clipped * adv_t) / k
+        # Entropy bonus: subtract to encourage diverse, longer plans
+        loss = ppo_loss - entropy_coef * entropy / k
         loss.backward()
         total_loss_val += loss.item()
 
@@ -178,6 +191,7 @@ def _grpo_step(
         "grad_norm":   float(grad_norm),
         "plans":       plans,
         "step1s":      step1s,
+        "prompt_variant": prompt_variant,
     }
 
 
@@ -191,6 +205,8 @@ def train(
     n_reward_steps: int = 1,
     clip_norm: float = 1.0,
     temperature: float = TEMPERATURE,
+    entropy_coef: float = 0.0,
+    diverse_prompts: bool = False,
 ):
     load_vlm2()
     load_vlm3()
@@ -236,7 +252,8 @@ def train(
 
     print(f"GRPO training: {n_steps} steps · K={k_samples} · lr={lr} · "
           f"n_reward_steps={n_reward_steps} · clip_norm={clip_norm} · "
-          f"temperature={temperature} · start_step={step}")
+          f"temperature={temperature} · entropy_coef={entropy_coef} · "
+          f"diverse_prompts={diverse_prompts} · start_step={step}")
 
     # Pre-training val baseline (step -1) — untrained model anchor
     if resume_from is None and resume_step == 0:
@@ -265,9 +282,11 @@ def train(
         eval_frames  = [frames[t + i]  for i in range(n_reward_steps)]
         eval_actions = [actions[t + i] for i in range(n_reward_steps)]
 
+        prompt_variant = int(rng.integers(0, 10)) if diverse_prompts else None
         result = _grpo_step(
             goal, history, eval_frames, eval_actions, optimizer,
             k=k_samples, clip_norm=clip_norm, temperature=temperature,
+            entropy_coef=entropy_coef, prompt_variant=prompt_variant,
         )
         result["step"] = step
         result["goal"] = goal
@@ -337,8 +356,12 @@ if __name__ == "__main__":
                     help="Timesteps to average reward over per plan (frozen label)")
     ap.add_argument("--clip_norm",      type=float, default=1.0,
                     help="Gradient clipping max norm (default 1.0)")
-    ap.add_argument("--temperature",    type=float, default=TEMPERATURE,
+    ap.add_argument("--temperature",     type=float, default=TEMPERATURE,
                     help="Sampling temperature for Qwen plan generation (default 1.0)")
+    ap.add_argument("--entropy_coef",    type=float, default=0.0,
+                    help="Entropy bonus coefficient (default 0.0; use 0.01 for run 7)")
+    ap.add_argument("--diverse_prompts", action="store_true",
+                    help="Randomly sample from open-ended prompt pool each step")
     args = ap.parse_args()
     train(
         args.steps, args.k_samples, args.lr, args.output,
@@ -347,4 +370,6 @@ if __name__ == "__main__":
         n_reward_steps=args.n_reward_steps,
         clip_norm=args.clip_norm,
         temperature=args.temperature,
+        entropy_coef=args.entropy_coef,
+        diverse_prompts=args.diverse_prompts,
     )
