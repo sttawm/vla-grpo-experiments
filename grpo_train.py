@@ -157,6 +157,11 @@ def train(n_steps: int, k_samples: int, lr: float, output_path: Path):
     import models as M
     M._qwen_model = _apply_lora(qwen)
 
+    # get_peft_model sets train mode; switch back to eval so dropout is
+    # disabled and old_lp / new_lp are deterministic for the same input.
+    # Gradients still flow through LoRA params in eval mode.
+    M._qwen_model.eval()
+
     from models import _qwen_model as qwen_lora
     optimizer = torch.optim.AdamW(
         [p for p in qwen_lora.parameters() if p.requires_grad],
