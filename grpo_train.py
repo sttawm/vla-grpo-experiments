@@ -324,7 +324,7 @@ def train(
             )
 
         # Log a warning if reward_std has been near zero for a while
-        recent_stds = [e["reward_std"] for e in log[-COLLAPSE_WINDOW:]]
+        recent_stds = [e["reward_std"] for e in log[-COLLAPSE_WINDOW:] if "reward_std" in e]
         if (len(recent_stds) == COLLAPSE_WINDOW and
                 all(s < COLLAPSE_THRESHOLD for s in recent_stds)):
             print(
