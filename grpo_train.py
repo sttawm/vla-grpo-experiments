@@ -64,13 +64,14 @@ def _seq_log_prob(qwen, proc, inputs, plan_text: str) -> torch.Tensor:
         plan_text, return_tensors="pt", add_special_tokens=False
     )["input_ids"].to(DEVICE)
     full_ids = torch.cat([inputs["input_ids"], target_ids], dim=1)
-    with torch.cuda.amp.autocast(dtype=DTYPE):
-        logits = qwen(
-            input_ids=full_ids,
-            attention_mask=torch.ones_like(full_ids),
-            pixel_values=inputs.get("pixel_values"),
-            image_grid_thw=inputs.get("image_grid_thw"),
-        ).logits
+    # No autocast needed — model weights already in bfloat16; autocast
+    # can interfere with integer tensor handling inside Qwen's forward.
+    logits = qwen(
+        input_ids=full_ids,
+        attention_mask=torch.ones_like(full_ids),
+        pixel_values=inputs.get("pixel_values"),
+        image_grid_thw=inputs.get("image_grid_thw"),
+    ).logits
     plan_logits = logits[0, inputs["input_ids"].shape[1] - 1:-1]
     log_p = torch.nn.functional.log_softmax(plan_logits, dim=-1)
     return log_p.gather(1, target_ids[0].unsqueeze(1)).squeeze(1).sum()
