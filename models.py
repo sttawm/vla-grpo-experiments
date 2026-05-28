@@ -84,6 +84,23 @@ def _build_qwen_messages(goal: str, frames: list[np.ndarray], n_steps: int = 2) 
     return [{"role": "user", "content": image_content + [text_content]}]
 
 
+def _build_qwen_inputs(goal: str, frame_history: list[np.ndarray]):
+    """Process images + text into model inputs. Separated so callers can reuse."""
+    load_vlm2()
+    frames = list(frame_history[-N_HISTORY:])
+    messages = _build_qwen_messages(goal, frames, n_steps=1)
+    text_input = _qwen_processor.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True
+    )
+    inputs = _qwen_processor(
+        text=[text_input],
+        images=[Image.fromarray(f) for f in frames],
+        return_tensors="pt",
+        padding=True,
+    ).to(DEVICE)
+    return inputs
+
+
 def plan_vlm2(
     goal: str,
     frame_history: list[np.ndarray],
@@ -96,33 +113,42 @@ def plan_vlm2(
     frame_history: list of up to N_HISTORY frames (numpy uint8 RGB).
     n_steps: number of steps to request from Qwen (only step 1 is used as label).
     """
-    load_vlm2()
-    frames   = list(frame_history[-N_HISTORY:])
-    messages = _build_qwen_messages(goal, frames, n_steps=n_steps)
-
-    text_input   = _qwen_processor.apply_chat_template(
-        messages, tokenize=False, add_generation_prompt=True
-    )
-    image_inputs = [Image.fromarray(f) for f in frames]
-
-    inputs = _qwen_processor(
-        text=[text_input],
-        images=image_inputs,
-        return_tensors="pt",
-        padding=True,
-    ).to(DEVICE)
-
+    inputs = _build_qwen_inputs(goal, frame_history)
     gen_kwargs = dict(max_new_tokens=60, do_sample=do_sample)
     if do_sample:
         gen_kwargs["temperature"] = temperature
-
     with torch.no_grad():
         out = _qwen_model.generate(**inputs, **gen_kwargs)
-
     generated = out[0][inputs["input_ids"].shape[1]:]
     full_text  = _qwen_processor.decode(generated, skip_special_tokens=True).strip()
-    step1      = _parse_step1(full_text)
-    return full_text, step1
+    return full_text, _parse_step1(full_text)
+
+
+def plan_vlm2_batch(
+    goal: str,
+    frame_history: list[np.ndarray],
+    k: int,
+    do_sample: bool = True,
+    temperature: float = 1.0,
+) -> tuple[list[str], list[str], dict]:
+    """
+    Generate k plans in one batched generate call.
+    Returns (full_texts, step1_labels, inputs) — inputs is reusable for log prob computation.
+    """
+    inputs = _build_qwen_inputs(goal, frame_history)
+    gen_kwargs = dict(max_new_tokens=60, do_sample=do_sample, num_return_sequences=k)
+    if do_sample:
+        gen_kwargs["temperature"] = temperature
+    with torch.no_grad():
+        out = _qwen_model.generate(**inputs, **gen_kwargs)
+    prompt_len = inputs["input_ids"].shape[1]
+    full_texts, step1s = [], []
+    for i in range(k):
+        generated = out[i][prompt_len:]
+        full_text  = _qwen_processor.decode(generated, skip_special_tokens=True).strip()
+        full_texts.append(full_text)
+        step1s.append(_parse_step1(full_text))
+    return full_texts, step1s, inputs
 
 
 def _parse_step1(plan_text: str) -> str:

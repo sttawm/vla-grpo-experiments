@@ -130,32 +130,17 @@ def _grpo_step(
     temperature: float = TEMPERATURE,
 ) -> dict:
     from models import _qwen_model as qwen, _qwen_processor as proc
-    from models import _build_qwen_messages
-    from PIL import Image as PILImage
+    from models import plan_vlm2_batch
 
-    frames_use = list(frame_history[-N_HISTORY:])
-    frames_pil = [PILImage.fromarray(f) for f in frames_use]
-    messages   = _build_qwen_messages(goal, frames_use, n_steps=1)
-    text_input = proc.apply_chat_template(
-        messages, tokenize=False, add_generation_prompt=True
+    # ── 1. Sample K plans in one batched call; reuse inputs for log probs ─────
+    plans, step1s, inputs = plan_vlm2_batch(
+        goal, frame_history, k=k, do_sample=True, temperature=temperature,
     )
-    inputs = proc(
-        text=[text_input], images=frames_pil,
-        return_tensors="pt", padding=True,
-    ).to(DEVICE)
-
-    # ── 1. Sample K plans + record old log probs (reference policy, no grad) ──
-    plans, step1s, old_log_probs = [], [], []
-    for _ in range(k):
-        full_text, step1 = plan_vlm2(
-            goal, frame_history,
-            n_steps=1, do_sample=True, temperature=temperature,
-        )
-        plans.append(full_text)
-        step1s.append(step1)
-        with torch.no_grad():
-            old_lp = _seq_log_prob(qwen, proc, inputs, full_text)
-        old_log_probs.append(old_lp.detach())
+    old_log_probs = []
+    with torch.no_grad():
+        for plan_text in plans:
+            old_lp = _seq_log_prob(qwen, proc, inputs, plan_text)
+            old_log_probs.append(old_lp.detach())
 
     # ── 2. Rewards: average over eval_frames with frozen plan label ───────────
     rewards = np.array([
