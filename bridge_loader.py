@@ -10,6 +10,10 @@ import io
 import numpy as np
 import tensorflow as tf
 from PIL import Image
+
+# TF pre-allocates all GPU memory by default — we only use it for GCS TFRecord
+# reading (CPU/network work), so hide the GPU from TF entirely.
+tf.config.set_visible_devices([], 'GPU')
 from pathlib import Path
 
 GCS_BASE   = "gs://gresearch/robotics/bridge/0.1.0"
