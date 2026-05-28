@@ -34,9 +34,13 @@ K_SAMPLES   = 8
 TEMPERATURE = 1.0
 EPS_CLIP    = 0.2
 
-VAL_EPISODES = 50   # episodes from train split (seed=42 ≠ training seed=0)
-VAL_STRIDE   = 8    # timestep stride within each episode
-VAL_SEED     = 42
+VAL_EPISODES  = 25   # episodes from train split (seed=42 ≠ training seed=0)
+VAL_STRIDE    = 8    # timestep stride within each episode
+VAL_SEED      = 42
+VAL_FREQ      = 50   # run val eval every N training steps
+
+COLLAPSE_WINDOW    = 5      # consecutive steps with reward_std below threshold = collapse
+COLLAPSE_THRESHOLD = 0.01   # reward_std below this is considered zero
 
 # LoRA config — targets attention + FFN projections in the language model
 LORA_RANK    = 32
@@ -265,7 +269,7 @@ def train(
             f"rewards=[{', '.join(f'{r:.3f}' for r in result['rewards'])}]"
         )
 
-        # Checkpoint + val eval every 100 steps
+        # Checkpoint every 100 steps
         if (step + 1) % 100 == 0:
             ckpt = RESULTS_DIR / f"qwen_lora_step{step + 1}"
             from models import _qwen_processor as proc
@@ -273,6 +277,8 @@ def train(
             proc.save_pretrained(ckpt)
             print(f"  Checkpoint saved: {ckpt}")
 
+        # Val eval every VAL_FREQ steps
+        if (step + 1) % VAL_FREQ == 0:
             print(f"  Running val eval ({VAL_EPISODES} episodes, stride={VAL_STRIDE})...")
             val = _val_eval()
             result["val_mean_reward"] = val["val_mean_reward"]
@@ -280,6 +286,7 @@ def train(
             is_best = val["val_mean_reward"] > best_val_reward
             if is_best:
                 best_val_reward = val["val_mean_reward"]
+                from models import _qwen_processor as proc
                 best_ckpt = RESULTS_DIR / "qwen_lora_best"
                 qwen_lora.save_pretrained(best_ckpt)
                 proc.save_pretrained(best_ckpt)
@@ -288,6 +295,16 @@ def train(
                 f"{val['val_std_reward']:.4f}  ({val['val_n_episodes']} episodes)"
                 + ("  *** NEW BEST ***" if is_best else "")
             )
+
+        # Collapse detection: kill run if reward_std near zero for several steps
+        recent_stds = [e["reward_std"] for e in log[-COLLAPSE_WINDOW:]]
+        if (len(recent_stds) == COLLAPSE_WINDOW and
+                all(s < COLLAPSE_THRESHOLD for s in recent_stds)):
+            print(
+                f"\n!!! MODE COLLAPSE DETECTED: reward_std < {COLLAPSE_THRESHOLD} "
+                f"for {COLLAPSE_WINDOW} consecutive steps. Stopping early. !!!"
+            )
+            break
 
         with open(output_path, "w") as f:
             json.dump(log, f, indent=2)
