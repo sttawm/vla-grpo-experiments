@@ -203,7 +203,9 @@ def train(
     if resume_from is not None:
         from peft import PeftModel
         print(f"Resuming LoRA from {resume_from} at step {resume_step}")
-        M._qwen_model = PeftModel.from_pretrained(qwen_base, str(resume_from))
+        M._qwen_model = PeftModel.from_pretrained(
+            qwen_base, str(resume_from), is_trainable=True
+        )
     else:
         M._qwen_model = _apply_lora(qwen_base)
 
