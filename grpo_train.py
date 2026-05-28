@@ -253,6 +253,17 @@ def train(
           f"n_reward_steps={n_reward_steps} · clip_norm={clip_norm} · "
           f"temperature={temperature} · start_step={step}")
 
+    # Pre-training val baseline (step -1) — untrained model anchor
+    if resume_from is None and resume_step == 0:
+        print("  Running pre-training val baseline (step -1)...")
+        pre_val = _val_eval()
+        log.append({"step": -1, "val_mean_reward": pre_val["val_mean_reward"],
+                     "val_std_reward": pre_val["val_std_reward"]})
+        print(f"  Pre-train val: mean_reward={pre_val['val_mean_reward']:+.4f} ± "
+              f"{pre_val['val_std_reward']:.4f}  ({pre_val['val_n_episodes']} episodes)")
+        with open(output_path, "w") as f:
+            json.dump(log, f, indent=2)
+
     for goal, frames, actions in episode_iter:
         if step >= n_steps:
             break
