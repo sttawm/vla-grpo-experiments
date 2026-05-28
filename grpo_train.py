@@ -127,6 +127,7 @@ def _grpo_step(
     optimizer: torch.optim.Optimizer,
     k: int = K_SAMPLES,
     clip_norm: float = 1.0,
+    temperature: float = TEMPERATURE,
 ) -> dict:
     from models import _qwen_model as qwen, _qwen_processor as proc
     from models import _build_qwen_messages
@@ -148,7 +149,7 @@ def _grpo_step(
     for _ in range(k):
         full_text, step1 = plan_vlm2(
             goal, frame_history,
-            n_steps=1, do_sample=True, temperature=TEMPERATURE,
+            n_steps=1, do_sample=True, temperature=temperature,
         )
         plans.append(full_text)
         step1s.append(step1)
@@ -204,6 +205,7 @@ def train(
     resume_step: int = 0,
     n_reward_steps: int = 1,
     clip_norm: float = 1.0,
+    temperature: float = TEMPERATURE,
 ):
     load_vlm2()
     load_vlm3()
@@ -248,7 +250,8 @@ def train(
     )
 
     print(f"GRPO training: {n_steps} steps · K={k_samples} · lr={lr} · "
-          f"n_reward_steps={n_reward_steps} · clip_norm={clip_norm} · start_step={step}")
+          f"n_reward_steps={n_reward_steps} · clip_norm={clip_norm} · "
+          f"temperature={temperature} · start_step={step}")
 
     for goal, frames, actions in episode_iter:
         if step >= n_steps:
@@ -268,7 +271,7 @@ def train(
 
         result = _grpo_step(
             goal, history, eval_frames, eval_actions, optimizer,
-            k=k_samples, clip_norm=clip_norm,
+            k=k_samples, clip_norm=clip_norm, temperature=temperature,
         )
         result["step"] = step
         result["goal"] = goal
@@ -338,6 +341,8 @@ if __name__ == "__main__":
                     help="Timesteps to average reward over per plan (frozen label)")
     ap.add_argument("--clip_norm",      type=float, default=1.0,
                     help="Gradient clipping max norm (default 1.0)")
+    ap.add_argument("--temperature",    type=float, default=TEMPERATURE,
+                    help="Sampling temperature for Qwen plan generation (default 1.0)")
     args = ap.parse_args()
     train(
         args.steps, args.k_samples, args.lr, args.output,
@@ -345,4 +350,5 @@ if __name__ == "__main__":
         resume_step=args.resume_step,
         n_reward_steps=args.n_reward_steps,
         clip_norm=args.clip_norm,
+        temperature=args.temperature,
     )
