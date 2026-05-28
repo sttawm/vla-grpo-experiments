@@ -122,10 +122,11 @@ def _seq_log_prob(qwen, proc, inputs, plan_text: str) -> torch.Tensor:
 def _grpo_step(
     goal: str,
     frame_history: list,
-    current_frame,
-    gt_action: np.ndarray,
+    eval_frames: list,      # 1 or N frames to average reward over (frozen plan)
+    eval_actions: list,     # matching gt_actions
     optimizer: torch.optim.Optimizer,
     k: int = K_SAMPLES,
+    clip_norm: float = 1.0,
 ) -> dict:
     from models import _qwen_model as qwen, _qwen_processor as proc
     from models import _build_qwen_messages
@@ -155,9 +156,12 @@ def _grpo_step(
             old_lp = _seq_log_prob(qwen, proc, inputs, full_text)
         old_log_probs.append(old_lp.detach())
 
-    # ── 2. Rewards + group-relative advantages ────────────────────────────────
+    # ── 2. Rewards: average over eval_frames with frozen plan label ───────────
     rewards = np.array([
-        compute_reward(goal, current_frame, gt_action, label=s)[0]
+        float(np.mean([
+            compute_reward(goal, frame, action, label=s)[0]
+            for frame, action in zip(eval_frames, eval_actions)
+        ]))
         for s in step1s
     ], dtype=np.float32)
     r_mean     = rewards.mean()
@@ -176,13 +180,13 @@ def _grpo_step(
         loss.backward()
         total_loss_val += loss.item()
 
-    grad_norm = torch.nn.utils.clip_grad_norm_(qwen.parameters(), 1.0)
+    grad_norm = torch.nn.utils.clip_grad_norm_(qwen.parameters(), clip_norm)
     optimizer.step()
 
     return {
         "rewards":     rewards.tolist(),
         "mean_reward": float(r_mean),
-        "reward_std":  float(r_std - 1e-8),   # pre-normalization std; ~0 = no RL signal
+        "reward_std":  float(r_std - 1e-8),
         "advantages":  advantages.tolist(),
         "loss":        total_loss_val,
         "grad_norm":   float(grad_norm),
@@ -198,6 +202,8 @@ def train(
     output_path: Path,
     resume_from: Path | None = None,
     resume_step: int = 0,
+    n_reward_steps: int = 1,
+    clip_norm: float = 1.0,
 ):
     load_vlm2()
     load_vlm3()
@@ -241,24 +247,29 @@ def train(
         "train", max_episodes=(n_steps - resume_step) * 4, seed=ep_seed
     )
 
-    print(f"GRPO training: {n_steps} steps · K={k_samples} · lr={lr} · start_step={step}")
+    print(f"GRPO training: {n_steps} steps · K={k_samples} · lr={lr} · "
+          f"n_reward_steps={n_reward_steps} · clip_norm={clip_norm} · start_step={step}")
 
     for goal, frames, actions in episode_iter:
         if step >= n_steps:
             break
 
         T = len(frames)
-        if T <= N_HISTORY:
+        if T <= N_HISTORY + n_reward_steps - 1:
             continue
 
-        rng = np.random.default_rng(step)
-        t   = int(rng.integers(N_HISTORY, T))
+        rng    = np.random.default_rng(step)
+        t_max  = T - n_reward_steps          # ensure full window fits
+        t      = int(rng.integers(N_HISTORY, t_max + 1))
 
-        history   = list(frames[max(0, t - N_HISTORY):t])
-        current   = frames[t]
-        gt_action = actions[t]
+        history      = list(frames[max(0, t - N_HISTORY):t])
+        eval_frames  = [frames[t + i]  for i in range(n_reward_steps)]
+        eval_actions = [actions[t + i] for i in range(n_reward_steps)]
 
-        result = _grpo_step(goal, history, current, gt_action, optimizer, k=k_samples)
+        result = _grpo_step(
+            goal, history, eval_frames, eval_actions, optimizer,
+            k=k_samples, clip_norm=clip_norm,
+        )
         result["step"] = step
         result["goal"] = goal
         log.append(result)
@@ -317,17 +328,21 @@ def train(
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("--steps",       type=int,   default=1000)
-    ap.add_argument("--k_samples",   type=int,   default=K_SAMPLES)
-    ap.add_argument("--lr",          type=float, default=3e-4)
-    ap.add_argument("--output",      type=Path,  default=RESULTS_DIR / "grpo_log.json")
-    ap.add_argument("--resume_from", type=Path,  default=None,
-                    help="LoRA checkpoint dir to resume from (e.g. results/qwen_lora_step200)")
-    ap.add_argument("--resume_step", type=int,   default=0,
-                    help="Training step at which the checkpoint was saved")
+    ap.add_argument("--steps",          type=int,   default=1000)
+    ap.add_argument("--k_samples",      type=int,   default=K_SAMPLES)
+    ap.add_argument("--lr",             type=float, default=3e-4)
+    ap.add_argument("--output",         type=Path,  default=RESULTS_DIR / "grpo_log.json")
+    ap.add_argument("--resume_from",    type=Path,  default=None)
+    ap.add_argument("--resume_step",    type=int,   default=0)
+    ap.add_argument("--n_reward_steps", type=int,   default=1, choices=[1, 2, 4],
+                    help="Timesteps to average reward over per plan (frozen label)")
+    ap.add_argument("--clip_norm",      type=float, default=1.0,
+                    help="Gradient clipping max norm (default 1.0)")
     args = ap.parse_args()
     train(
         args.steps, args.k_samples, args.lr, args.output,
         resume_from=args.resume_from,
         resume_step=args.resume_step,
+        n_reward_steps=args.n_reward_steps,
+        clip_norm=args.clip_norm,
     )
