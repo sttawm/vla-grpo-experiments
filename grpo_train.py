@@ -176,7 +176,7 @@ def _grpo_step(
         loss.backward()
         total_loss_val += loss.item()
 
-    torch.nn.utils.clip_grad_norm_(qwen.parameters(), 1.0)
+    grad_norm = torch.nn.utils.clip_grad_norm_(qwen.parameters(), 1.0)
     optimizer.step()
 
     return {
@@ -185,6 +185,7 @@ def _grpo_step(
         "reward_std":  float(r_std - 1e-8),   # pre-normalization std; ~0 = no RL signal
         "advantages":  advantages.tolist(),
         "loss":        total_loss_val,
+        "grad_norm":   float(grad_norm),
         "plans":       plans,
         "step1s":      step1s,
     }
@@ -265,7 +266,8 @@ def train(
         print(
             f"Step {step:4d} | mean_reward={result['mean_reward']:+.4f} | "
             f"reward_std={result['reward_std']:.4f} | "
-            f"loss={result['loss']:.4f} | "
+            f"grad_norm={result['grad_norm']:.4f} | "
+            f"loss={result['loss']:.6f} | "
             f"rewards=[{', '.join(f'{r:.3f}' for r in result['rewards'])}]"
         )
 
