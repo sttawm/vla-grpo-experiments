@@ -54,7 +54,6 @@ def _apply_lora(model):
         bias="none",
     )
     model = get_peft_model(model, config)
-    model.gradient_checkpointing_enable()
     model.print_trainable_parameters()
     return model
 
