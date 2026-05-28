@@ -219,11 +219,15 @@ def train(
 
     # Load existing log entries up to resume_step; fresh otherwise
     log: list = []
+    best_val_reward = -float("inf")
     if resume_from is not None and output_path.exists():
         with open(output_path) as f:
             existing = json.load(f)
         log = [e for e in existing if e["step"] < resume_step]
-        print(f"  Loaded {len(log)} prior log entries.")
+        prior_vals = [e["val_mean_reward"] for e in log if "val_mean_reward" in e]
+        if prior_vals:
+            best_val_reward = max(prior_vals)
+        print(f"  Loaded {len(log)} prior log entries (best val so far: {best_val_reward:.4f}).")
 
     step = resume_step
     # Use a seed offset so resumed runs see different episodes than the original
@@ -273,9 +277,16 @@ def train(
             val = _val_eval()
             result["val_mean_reward"] = val["val_mean_reward"]
             result["val_std_reward"]  = val["val_std_reward"]
+            is_best = val["val_mean_reward"] > best_val_reward
+            if is_best:
+                best_val_reward = val["val_mean_reward"]
+                best_ckpt = RESULTS_DIR / "qwen_lora_best"
+                qwen_lora.save_pretrained(best_ckpt)
+                proc.save_pretrained(best_ckpt)
             print(
                 f"  Val: mean_reward={val['val_mean_reward']:+.4f} ± "
                 f"{val['val_std_reward']:.4f}  ({val['val_n_episodes']} episodes)"
+                + ("  *** NEW BEST ***" if is_best else "")
             )
 
         with open(output_path, "w") as f:
