@@ -186,18 +186,27 @@ def _grpo_step(
     }
 
 
-def train(n_steps: int, k_samples: int, lr: float, output_path: Path):
+def train(
+    n_steps: int,
+    k_samples: int,
+    lr: float,
+    output_path: Path,
+    resume_from: Path | None = None,
+    resume_step: int = 0,
+):
     load_vlm2()
     load_vlm3()
 
-    # Wrap Qwen with LoRA — only adapter weights will be updated
-    from models import _qwen_model as qwen
+    from models import _qwen_model as qwen_base
     import models as M
-    M._qwen_model = _apply_lora(qwen)
 
-    # get_peft_model sets train mode; switch back to eval so dropout is
-    # disabled and old_lp / new_lp are deterministic for the same input.
-    # Gradients still flow through LoRA params in eval mode.
+    if resume_from is not None:
+        from peft import PeftModel
+        print(f"Resuming LoRA from {resume_from} at step {resume_step}")
+        M._qwen_model = PeftModel.from_pretrained(qwen_base, str(resume_from))
+    else:
+        M._qwen_model = _apply_lora(qwen_base)
+
     M._qwen_model.eval()
 
     from models import _qwen_model as qwen_lora
@@ -206,11 +215,22 @@ def train(n_steps: int, k_samples: int, lr: float, output_path: Path):
         lr=lr,
     )
 
-    log  = []
-    step = 0
-    episode_iter = iter_episodes("train", max_episodes=n_steps * 4, seed=0)
+    # Load existing log entries up to resume_step; fresh otherwise
+    log: list = []
+    if resume_from is not None and output_path.exists():
+        with open(output_path) as f:
+            existing = json.load(f)
+        log = [e for e in existing if e["step"] < resume_step]
+        print(f"  Loaded {len(log)} prior log entries.")
 
-    print(f"GRPO training: {n_steps} steps · K={k_samples} · lr={lr}")
+    step = resume_step
+    # Use a seed offset so resumed runs see different episodes than the original
+    ep_seed = resume_step if resume_from is not None else 0
+    episode_iter = iter_episodes(
+        "train", max_episodes=(n_steps - resume_step) * 4, seed=ep_seed
+    )
+
+    print(f"GRPO training: {n_steps} steps · K={k_samples} · lr={lr} · start_step={step}")
 
     for goal, frames, actions in episode_iter:
         if step >= n_steps:
@@ -266,9 +286,17 @@ def train(n_steps: int, k_samples: int, lr: float, output_path: Path):
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("--steps",     type=int,   default=1000)
-    ap.add_argument("--k_samples", type=int,   default=K_SAMPLES)
-    ap.add_argument("--lr",        type=float, default=3e-4)
-    ap.add_argument("--output",    type=Path,  default=RESULTS_DIR / "grpo_log.json")
+    ap.add_argument("--steps",       type=int,   default=1000)
+    ap.add_argument("--k_samples",   type=int,   default=K_SAMPLES)
+    ap.add_argument("--lr",          type=float, default=3e-4)
+    ap.add_argument("--output",      type=Path,  default=RESULTS_DIR / "grpo_log.json")
+    ap.add_argument("--resume_from", type=Path,  default=None,
+                    help="LoRA checkpoint dir to resume from (e.g. results/qwen_lora_step200)")
+    ap.add_argument("--resume_step", type=int,   default=0,
+                    help="Training step at which the checkpoint was saved")
     args = ap.parse_args()
-    train(args.steps, args.k_samples, args.lr, args.output)
+    train(
+        args.steps, args.k_samples, args.lr, args.output,
+        resume_from=args.resume_from,
+        resume_step=args.resume_step,
+    )
