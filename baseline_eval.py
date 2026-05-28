@@ -32,7 +32,7 @@ RESULTS_DIR.mkdir(exist_ok=True)
 MODES = ("vla_only", "vla_midlevel")
 
 
-def evaluate(mode: str, n_episodes: int, stride: int, output_path: Path, n_steps: int = 2):
+def evaluate(mode: str, n_episodes: int, stride: int, output_path: Path, n_steps: int = 2, split: str = "test"):
     if mode not in MODES:
         raise ValueError(f"mode must be one of {MODES}")
 
@@ -53,7 +53,7 @@ def evaluate(mode: str, n_episodes: int, stride: int, output_path: Path, n_steps
     done_episodes = len(results)
 
     for ep_idx, (goal, frames, actions) in enumerate(
-        iter_episodes("test", max_episodes=n_episodes)
+        iter_episodes(split, max_episodes=n_episodes)
     ):
         if ep_idx < done_episodes:
             continue
@@ -165,14 +165,17 @@ if __name__ == "__main__":
     ap.add_argument("--stride",     type=int, default=4)
     ap.add_argument("--n_steps",    type=int, default=2, choices=[1, 2, 4],
                     help="Number of steps to request from Qwen (vla_midlevel only)")
+    ap.add_argument("--split",      choices=["train", "test"], default="test",
+                    help="Dataset split to evaluate on (default: test)")
     ap.add_argument("--output",     type=Path, default=None,
-                    help="Override output path (default: results/baseline_{mode}_{n_steps}step.json)")
+                    help="Override output path (default: results/baseline_{mode}_{n_steps}step_{split}.json)")
     args = ap.parse_args()
 
     if args.output is None:
+        split_tag = f"_{args.split}" if args.split != "test" else ""
         if args.mode == "vla_only":
-            args.output = RESULTS_DIR / "baseline_vla_only.json"
+            args.output = RESULTS_DIR / f"baseline_vla_only{split_tag}.json"
         else:
-            args.output = RESULTS_DIR / f"baseline_vla_midlevel_{args.n_steps}step.json"
+            args.output = RESULTS_DIR / f"baseline_vla_midlevel_{args.n_steps}step{split_tag}.json"
 
-    evaluate(args.mode, args.n_episodes, args.stride, args.output, n_steps=args.n_steps)
+    evaluate(args.mode, args.n_episodes, args.stride, args.output, n_steps=args.n_steps, split=args.split)
