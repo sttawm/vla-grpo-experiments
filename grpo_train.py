@@ -39,7 +39,7 @@ VAL_STRIDE    = 8    # timestep stride within each episode
 VAL_SEED      = 42
 VAL_FREQ      = 50   # run val eval every N training steps
 
-COLLAPSE_WINDOW    = 5      # consecutive steps with reward_std below threshold = collapse
+COLLAPSE_WINDOW    = 20     # consecutive steps with reward_std below threshold = collapse
 COLLAPSE_THRESHOLD = 0.01   # reward_std below this is considered zero
 
 # LoRA config — targets attention + FFN projections in the language model
