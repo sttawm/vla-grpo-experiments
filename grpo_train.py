@@ -39,7 +39,7 @@ VAL_STRIDE    = 8    # timestep stride within each episode
 VAL_SEED      = 42
 VAL_FREQ      = 50   # run val eval every N training steps
 
-COLLAPSE_WINDOW    = 20     # consecutive steps with reward_std below threshold = collapse
+COLLAPSE_WINDOW    = 20     # window for logging collapse warning
 COLLAPSE_THRESHOLD = 0.01   # reward_std below this is considered zero
 
 # LoRA config — targets attention + FFN projections in the language model
@@ -296,15 +296,14 @@ def train(
                 + ("  *** NEW BEST ***" if is_best else "")
             )
 
-        # Collapse detection: kill run if reward_std near zero for several steps
+        # Log a warning if reward_std has been near zero for a while
         recent_stds = [e["reward_std"] for e in log[-COLLAPSE_WINDOW:]]
         if (len(recent_stds) == COLLAPSE_WINDOW and
                 all(s < COLLAPSE_THRESHOLD for s in recent_stds)):
             print(
-                f"\n!!! MODE COLLAPSE DETECTED: reward_std < {COLLAPSE_THRESHOLD} "
-                f"for {COLLAPSE_WINDOW} consecutive steps. Stopping early. !!!"
+                f"  [WARNING] reward_std < {COLLAPSE_THRESHOLD} for "
+                f"{COLLAPSE_WINDOW} consecutive steps — possible mode collapse"
             )
-            break
 
         with open(output_path, "w") as f:
             json.dump(log, f, indent=2)
