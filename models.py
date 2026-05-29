@@ -44,12 +44,10 @@ def load_vlm2():
     global _qwen_model, _qwen_processor
     if _qwen_model is not None:
         return
-    # AutoProcessor maps to the plain tokenizer for Qwen3-VL in transformers 4.52;
-    # use Qwen2_5_VLProcessor explicitly (shared multimodal processor for this arch family).
-    try:
-        from transformers import Qwen2_5_VLProcessor as QwenProc
-    except ImportError:
-        from transformers import AutoProcessor as QwenProc
+    # AutoProcessor returns a plain tokenizer for Qwen3-VL in transformers 4.52;
+    # Qwen2_5_VLProcessor.from_pretrained fails because Qwen3-VL has no video_preprocessor_config.
+    # Build the processor manually: image processor (Qwen2VLImageProcessorFast) + tokenizer.
+    from transformers import Qwen2VLImageProcessorFast, Qwen2_5_VLProcessor, AutoTokenizer
     try:
         from transformers import Qwen3VLForConditionalGeneration as QwenCls
     except ImportError:
@@ -58,7 +56,9 @@ def load_vlm2():
         except ImportError:
             from transformers import Qwen2VLForConditionalGeneration as QwenCls
     print(f"Loading VLM₂: {VLM2_MODEL_ID} with {QwenCls.__name__}")
-    _qwen_processor = QwenProc.from_pretrained(VLM2_MODEL_ID)
+    _img_proc = Qwen2VLImageProcessorFast.from_pretrained(VLM2_MODEL_ID)
+    _tokenizer = AutoTokenizer.from_pretrained(VLM2_MODEL_ID)
+    _qwen_processor = Qwen2_5_VLProcessor(image_processor=_img_proc, tokenizer=_tokenizer)
     _qwen_model = QwenCls.from_pretrained(
         VLM2_MODEL_ID,
         torch_dtype=DTYPE,
