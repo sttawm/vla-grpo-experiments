@@ -13,7 +13,7 @@ from qwen_vl_utils import process_vision_info
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 
-VLM2_MODEL_ID = "Qwen/Qwen3-VL-8B-Instruct"
+VLM2_MODEL_ID = "Qwen/Qwen2.5-VL-7B-Instruct"
 VLM3_MODEL_ID = "openvla/openvla-7b"
 UNNORM_KEY    = "bridge_orig"
 DEVICE        = "cuda"
@@ -41,39 +41,17 @@ _qwen_model     = None
 _qwen_processor = None
 
 
-class _QwenProc:
-    """Minimal processor for Qwen3-VL: bypasses the Qwen2_5_VLProcessor video-processor
-    requirement (transformers 4.52 enforces non-None video_processor, but Qwen3-VL ships
-    no video_preprocessor_config). Pairs Qwen2VLImageProcessorFast + AutoTokenizer."""
-
-    def __init__(self, tokenizer, image_processor):
-        self.tokenizer       = tokenizer
-        self.image_processor = image_processor
-
-    def apply_chat_template(self, *args, **kwargs):
-        return self.tokenizer.apply_chat_template(*args, **kwargs)
-
-    def save_pretrained(self, path):
-        self.tokenizer.save_pretrained(path)
-        self.image_processor.save_pretrained(path)
-
-
 def load_vlm2():
     global _qwen_model, _qwen_processor
     if _qwen_model is not None:
         return
-    from transformers import Qwen2VLImageProcessorFast, AutoTokenizer
+    from transformers import AutoProcessor
     try:
-        from transformers import Qwen3VLForConditionalGeneration as QwenCls
+        from transformers import Qwen2_5_VLForConditionalGeneration as QwenCls
     except ImportError:
-        try:
-            from transformers import Qwen2_5_VLForConditionalGeneration as QwenCls
-        except ImportError:
-            from transformers import Qwen2VLForConditionalGeneration as QwenCls
+        from transformers import Qwen2VLForConditionalGeneration as QwenCls
     print(f"Loading VLM₂: {VLM2_MODEL_ID} with {QwenCls.__name__}")
-    _img_proc  = Qwen2VLImageProcessorFast.from_pretrained(VLM2_MODEL_ID)
-    _tokenizer = AutoTokenizer.from_pretrained(VLM2_MODEL_ID)
-    _qwen_processor = _QwenProc(_tokenizer, _img_proc)
+    _qwen_processor = AutoProcessor.from_pretrained(VLM2_MODEL_ID)
     _qwen_model = QwenCls.from_pretrained(
         VLM2_MODEL_ID,
         torch_dtype=DTYPE,
