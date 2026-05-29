@@ -9,7 +9,6 @@ import re
 import numpy as np
 import torch
 from PIL import Image
-from qwen_vl_utils import process_vision_info
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 
@@ -122,17 +121,12 @@ def _build_qwen_inputs(
     text_input = _qwen_processor.apply_chat_template(
         messages, tokenize=False, add_generation_prompt=True
     )
-    image_inputs, _ = process_vision_info(messages)
-    text_data = _qwen_processor.tokenizer(
-        [text_input], return_tensors="pt", padding=True
-    )
-    img_data = _qwen_processor.image_processor(images=image_inputs, return_tensors="pt")
-    inputs = {
-        "input_ids":      text_data["input_ids"].to(DEVICE),
-        "attention_mask": text_data["attention_mask"].to(DEVICE),
-        "pixel_values":   img_data["pixel_values"].to(DEVICE, dtype=DTYPE),
-        "image_grid_thw": img_data["image_grid_thw"].to(DEVICE),
-    }
+    inputs = _qwen_processor(
+        text=[text_input],
+        images=[Image.fromarray(f) for f in frames],
+        return_tensors="pt",
+        padding=True,
+    ).to(DEVICE)
     return inputs
 
 
