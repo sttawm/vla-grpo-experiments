@@ -1,5 +1,5 @@
 """
-VLM₂  — Qwen2.5-VL-7B-Instruct (planner, online, sees last N frames)
+VLM₂  — Qwen3-VL-8B-Instruct (planner, online, sees last N frames)
 VLM₃  — OpenVLA-OFT (frozen controller, reward source)
 
 Both are loaded once and reused across all calls.
@@ -12,7 +12,7 @@ from PIL import Image
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 
-VLM2_MODEL_ID = "Qwen/Qwen2.5-VL-7B-Instruct"
+VLM2_MODEL_ID = "Qwen/Qwen3-VL-8B-Instruct"
 VLM3_MODEL_ID = "openvla/openvla-7b"
 UNNORM_KEY    = "bridge_orig"
 DEVICE        = "cuda"
@@ -46,9 +46,12 @@ def load_vlm2():
         return
     from transformers import AutoProcessor
     try:
-        from transformers import Qwen2_5_VLForConditionalGeneration as QwenCls
+        from transformers import Qwen3VLForConditionalGeneration as QwenCls
     except ImportError:
-        from transformers import Qwen2VLForConditionalGeneration as QwenCls
+        try:
+            from transformers import Qwen2_5_VLForConditionalGeneration as QwenCls
+        except ImportError:
+            from transformers import Qwen2VLForConditionalGeneration as QwenCls
     print(f"Loading VLM₂: {VLM2_MODEL_ID} with {QwenCls.__name__}")
     _qwen_processor = AutoProcessor.from_pretrained(VLM2_MODEL_ID)
     _qwen_model = QwenCls.from_pretrained(
@@ -235,6 +238,7 @@ def load_vlm3():
         torch_dtype=DTYPE,
         low_cpu_mem_usage=True,
         trust_remote_code=True,
+        attn_implementation="eager",
     ).to(DEVICE)
     _openvla_model.eval()
     # Freeze all parameters — never updated
