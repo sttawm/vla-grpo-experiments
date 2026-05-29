@@ -32,7 +32,7 @@ RESULTS_DIR.mkdir(exist_ok=True)
 MODES = ("vla_only", "vla_midlevel")
 
 
-def evaluate(mode: str, n_episodes: int, stride: int, output_path: Path, n_steps: int = 2, split: str = "test"):
+def evaluate(mode: str, n_episodes: int, stride: int, output_path: Path, n_steps: int = 2, split: str = "test", seed: int = 42):
     if mode not in MODES:
         raise ValueError(f"mode must be one of {MODES}")
 
@@ -53,7 +53,7 @@ def evaluate(mode: str, n_episodes: int, stride: int, output_path: Path, n_steps
     done_episodes = len(results)
 
     for ep_idx, (goal, frames, actions) in enumerate(
-        iter_episodes(split, max_episodes=n_episodes)
+        iter_episodes(split, max_episodes=n_episodes, seed=seed)
     ):
         if ep_idx < done_episodes:
             continue
@@ -167,6 +167,8 @@ if __name__ == "__main__":
                     help="Number of steps to request from Qwen (vla_midlevel only)")
     ap.add_argument("--split",      choices=["train", "test"], default="test",
                     help="Dataset split to evaluate on (default: test)")
+    ap.add_argument("--seed",       type=int, default=42,
+                    help="Episode shuffle seed (default: 42; use 42 for val to match GRPO val eval)")
     ap.add_argument("--output",     type=Path, default=None,
                     help="Override output path (default: results/baseline_{mode}_{n_steps}step_{split}.json)")
     args = ap.parse_args()
@@ -178,4 +180,4 @@ if __name__ == "__main__":
         else:
             args.output = RESULTS_DIR / f"baseline_vla_midlevel_{args.n_steps}step{split_tag}.json"
 
-    evaluate(args.mode, args.n_episodes, args.stride, args.output, n_steps=args.n_steps, split=args.split)
+    evaluate(args.mode, args.n_episodes, args.stride, args.output, n_steps=args.n_steps, split=args.split, seed=args.seed)
