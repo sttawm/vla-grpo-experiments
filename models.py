@@ -44,8 +44,12 @@ def load_vlm2():
     global _qwen_model, _qwen_processor
     if _qwen_model is not None:
         return
-    from transformers import AutoProcessor
-    # Qwen2.5-VL uses Qwen2_5_VLForConditionalGeneration (transformers >= 4.52)
+    # AutoProcessor maps to the plain tokenizer for Qwen3-VL in transformers 4.52;
+    # use Qwen2_5_VLProcessor explicitly (shared multimodal processor for this arch family).
+    try:
+        from transformers import Qwen2_5_VLProcessor as QwenProc
+    except ImportError:
+        from transformers import AutoProcessor as QwenProc
     try:
         from transformers import Qwen3VLForConditionalGeneration as QwenCls
     except ImportError:
@@ -54,7 +58,7 @@ def load_vlm2():
         except ImportError:
             from transformers import Qwen2VLForConditionalGeneration as QwenCls
     print(f"Loading VLM₂: {VLM2_MODEL_ID} with {QwenCls.__name__}")
-    _qwen_processor = AutoProcessor.from_pretrained(VLM2_MODEL_ID)
+    _qwen_processor = QwenProc.from_pretrained(VLM2_MODEL_ID)
     _qwen_model = QwenCls.from_pretrained(
         VLM2_MODEL_ID,
         torch_dtype=DTYPE,
