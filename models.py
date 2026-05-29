@@ -12,7 +12,7 @@ from PIL import Image
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 
-VLM2_MODEL_ID = "Qwen/Qwen2.5-VL-7B-Instruct"
+VLM2_MODEL_ID = "Qwen/Qwen3-VL-8B-Instruct"
 VLM3_MODEL_ID = "openvla/openvla-7b"
 UNNORM_KEY    = "bridge_orig"
 DEVICE        = "cuda"
@@ -47,9 +47,12 @@ def load_vlm2():
     from transformers import AutoProcessor
     # Qwen2.5-VL uses Qwen2_5_VLForConditionalGeneration (transformers >= 4.52)
     try:
-        from transformers import Qwen2_5_VLForConditionalGeneration as QwenCls
+        from transformers import Qwen3VLForConditionalGeneration as QwenCls
     except ImportError:
-        from transformers import Qwen2VLForConditionalGeneration as QwenCls
+        try:
+            from transformers import Qwen2_5_VLForConditionalGeneration as QwenCls
+        except ImportError:
+            from transformers import Qwen2VLForConditionalGeneration as QwenCls
     print(f"Loading VLM₂: {VLM2_MODEL_ID} with {QwenCls.__name__}")
     _qwen_processor = AutoProcessor.from_pretrained(VLM2_MODEL_ID)
     _qwen_model = QwenCls.from_pretrained(
@@ -112,12 +115,13 @@ def _build_qwen_messages(
 def _build_qwen_inputs(
     goal: str,
     frame_history: list[np.ndarray],
+    n_steps: int = 1,
     prompt_variant: int | None = None,
 ):
     """Process images + text into model inputs. Separated so callers can reuse."""
     load_vlm2()
     frames = list(frame_history[-N_HISTORY:])
-    messages = _build_qwen_messages(goal, frames, n_steps=1, prompt_variant=prompt_variant)
+    messages = _build_qwen_messages(goal, frames, n_steps=n_steps, prompt_variant=prompt_variant)
     text_input = _qwen_processor.apply_chat_template(
         messages, tokenize=False, add_generation_prompt=True
     )
@@ -144,7 +148,7 @@ def plan_vlm2(
     n_steps: number of steps to request from Qwen (only step 1 is used as label).
     prompt_variant: if set, use open-ended prompt pool variant instead of locked prompt.
     """
-    inputs = _build_qwen_inputs(goal, frame_history, prompt_variant=prompt_variant)
+    inputs = _build_qwen_inputs(goal, frame_history, n_steps=n_steps, prompt_variant=prompt_variant)
     gen_kwargs = dict(max_new_tokens=60, do_sample=do_sample)
     if do_sample:
         gen_kwargs["temperature"] = temperature
@@ -159,6 +163,7 @@ def plan_vlm2_batch(
     goal: str,
     frame_history: list[np.ndarray],
     k: int,
+    n_steps: int = 2,
     do_sample: bool = True,
     temperature: float = 1.0,
     prompt_variant: int | None = None,
@@ -166,9 +171,10 @@ def plan_vlm2_batch(
     """
     Generate k plans in one batched generate call.
     Returns (full_texts, step1_labels, inputs) — inputs is reusable for log prob computation.
+    n_steps: number of steps to request (only step 1 used as label/reward signal).
     prompt_variant: if set, use open-ended prompt pool variant instead of locked prompt.
     """
-    inputs = _build_qwen_inputs(goal, frame_history, prompt_variant=prompt_variant)
+    inputs = _build_qwen_inputs(goal, frame_history, n_steps=n_steps, prompt_variant=prompt_variant)
     gen_kwargs = dict(max_new_tokens=60, do_sample=do_sample, num_return_sequences=k)
     if do_sample:
         gen_kwargs["temperature"] = temperature

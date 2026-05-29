@@ -134,6 +134,7 @@ def _grpo_step(
     eval_actions: list,     # matching gt_actions
     optimizer: torch.optim.Optimizer,
     k: int = K_SAMPLES,
+    n_steps: int = 2,
     clip_norm: float = 1.0,
     temperature: float = TEMPERATURE,
     entropy_coef: float = 0.0,
@@ -144,7 +145,7 @@ def _grpo_step(
 
     # ── 1. Sample K plans in one batched call; reuse inputs for log probs ─────
     plans, step1s, inputs = plan_vlm2_batch(
-        goal, frame_history, k=k, do_sample=True, temperature=temperature,
+        goal, frame_history, k=k, n_steps=n_steps, do_sample=True, temperature=temperature,
         prompt_variant=prompt_variant,
     )
     old_log_probs = []
@@ -203,9 +204,10 @@ def train(
     resume_from: Path | None = None,
     resume_step: int = 0,
     n_reward_steps: int = 1,
+    n_plan_steps: int = 2,
     clip_norm: float = 1.0,
     temperature: float = TEMPERATURE,
-    entropy_coef: float = 0.0,
+    entropy_coef: float = 0.05,
     diverse_prompts: bool = False,
 ):
     load_vlm2()
@@ -251,9 +253,10 @@ def train(
     )
 
     print(f"GRPO training: {n_steps} steps · K={k_samples} · lr={lr} · "
-          f"n_reward_steps={n_reward_steps} · clip_norm={clip_norm} · "
-          f"temperature={temperature} · entropy_coef={entropy_coef} · "
-          f"diverse_prompts={diverse_prompts} · start_step={step}")
+          f"n_reward_steps={n_reward_steps} · n_plan_steps={n_plan_steps} · "
+          f"clip_norm={clip_norm} · temperature={temperature} · "
+          f"entropy_coef={entropy_coef} · diverse_prompts={diverse_prompts} · "
+          f"start_step={step}")
 
     # Pre-training val baseline (step -1) — untrained model anchor
     if resume_from is None and resume_step == 0:
@@ -285,8 +288,9 @@ def train(
         prompt_variant = int(rng.integers(0, 10)) if diverse_prompts else None
         result = _grpo_step(
             goal, history, eval_frames, eval_actions, optimizer,
-            k=k_samples, clip_norm=clip_norm, temperature=temperature,
-            entropy_coef=entropy_coef, prompt_variant=prompt_variant,
+            k=k_samples, n_steps=n_plan_steps, clip_norm=clip_norm,
+            temperature=temperature, entropy_coef=entropy_coef,
+            prompt_variant=prompt_variant,
         )
         result["step"] = step
         result["goal"] = goal
@@ -354,6 +358,8 @@ if __name__ == "__main__":
     ap.add_argument("--resume_step",    type=int,   default=0)
     ap.add_argument("--n_reward_steps", type=int,   default=1, choices=[1, 2, 4],
                     help="Timesteps to average reward over per plan (frozen label)")
+    ap.add_argument("--n_plan_steps",   type=int,   default=2, choices=[1, 2, 4],
+                    help="Steps to request from Qwen per plan (only step 1 used for reward)")
     ap.add_argument("--clip_norm",      type=float, default=1.0,
                     help="Gradient clipping max norm (default 1.0)")
     ap.add_argument("--temperature",     type=float, default=TEMPERATURE,
@@ -368,6 +374,7 @@ if __name__ == "__main__":
         resume_from=args.resume_from,
         resume_step=args.resume_step,
         n_reward_steps=args.n_reward_steps,
+        n_plan_steps=args.n_plan_steps,
         clip_norm=args.clip_norm,
         temperature=args.temperature,
         entropy_coef=args.entropy_coef,
