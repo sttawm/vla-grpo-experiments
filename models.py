@@ -10,6 +10,10 @@ import numpy as np
 import torch
 from PIL import Image
 
+# torch.compiler.is_compiling was added in PyTorch 2.3; patch for 2.2
+if not hasattr(torch.compiler, "is_compiling"):
+    torch.compiler.is_compiling = lambda: False
+
 # ── Config ─────────────────────────────────────────────────────────────────────
 
 VLM2_MODEL_ID = "Qwen/Qwen3-VL-8B-Instruct"
@@ -44,23 +48,17 @@ def load_vlm2():
     global _qwen_model, _qwen_processor
     if _qwen_model is not None:
         return
-    from transformers import AutoProcessor
-    try:
-        from transformers import Qwen3VLForConditionalGeneration as QwenCls
-    except ImportError:
-        try:
-            from transformers import Qwen2_5_VLForConditionalGeneration as QwenCls
-        except ImportError:
-            from transformers import Qwen2VLForConditionalGeneration as QwenCls
-    print(f"Loading VLM₂: {VLM2_MODEL_ID} with {QwenCls.__name__}")
+    from transformers import AutoProcessor, AutoModelForVision2Seq
+    print(f"Loading VLM₂: {VLM2_MODEL_ID}")
     _qwen_processor = AutoProcessor.from_pretrained(VLM2_MODEL_ID)
-    _qwen_model = QwenCls.from_pretrained(
+    _qwen_model = AutoModelForVision2Seq.from_pretrained(
         VLM2_MODEL_ID,
         torch_dtype=DTYPE,
         device_map=DEVICE,
+        attn_implementation="eager",
     )
     _qwen_model.eval()
-    print("VLM₂ ready.")
+    print(f"VLM₂ ready ({type(_qwen_model).__name__}).")
 
 
 def _build_qwen_messages(
@@ -231,7 +229,7 @@ def load_vlm3():
     from transformers import AutoModelForVision2Seq, AutoProcessor
     print(f"Loading VLM₃: {VLM3_MODEL_ID}")
     _openvla_processor = AutoProcessor.from_pretrained(
-        VLM3_MODEL_ID, trust_remote_code=True
+        VLM3_MODEL_ID, trust_remote_code=True, local_files_only=True
     )
     _openvla_model = AutoModelForVision2Seq.from_pretrained(
         VLM3_MODEL_ID,
@@ -239,12 +237,13 @@ def load_vlm3():
         low_cpu_mem_usage=True,
         trust_remote_code=True,
         attn_implementation="eager",
+        local_files_only=True,
     ).to(DEVICE)
     _openvla_model.eval()
     # Freeze all parameters — never updated
     for p in _openvla_model.parameters():
         p.requires_grad_(False)
-    print(f"VLM₃ ready. Action dim: {_openvla_model.get_action_dim(UNNORM_KEY)} DoF")
+    print(f"VLM₃ ready. Action dim: {_openvla_model.get_action_dim('bridge_orig')} DoF")
 
 
 def predict_vlm3(goal: str, frame: np.ndarray, label: str = None) -> np.ndarray:
@@ -273,17 +272,34 @@ def predict_vlm3(goal: str, frame: np.ndarray, label: str = None) -> np.ndarray:
 # ── Reward ─────────────────────────────────────────────────────────────────────
 
 def _action_std() -> np.ndarray:
-    """Per-dimension std from Bridge dataset (used to normalize L2)."""
+    """Per-dimension std for the active dataset (keyed by UNNORM_KEY)."""
     load_vlm3()
     try:
-        stats = _openvla_model.norm_stats["bridge_orig"]["action"]
+        stats = _openvla_model.norm_stats[UNNORM_KEY]["action"]
         std = np.array(stats["std"], dtype=np.float32)
-        # Guard against zero std (e.g. constant gripper dim in some splits)
         std = np.where(std < 1e-6, 1.0, std)
         return std
     except (KeyError, AttributeError):
-        # Fallback: empirical Bridge bridge_orig stds (xyz ~0.02m, rpy ~0.08rad, gripper ~0.5)
         return np.array([0.02, 0.02, 0.02, 0.08, 0.08, 0.08, 0.5], dtype=np.float32)
+
+
+def setup_libero(stats: dict):
+    """Patch LIBERO action stats into OpenVLA and switch UNNORM_KEY to 'libero_long'."""
+    global UNNORM_KEY
+    load_vlm3()
+    _openvla_model.norm_stats["libero_long"] = {
+        "action": {
+            "mean": np.array(stats["mean"], dtype=np.float64),
+            "std":  np.array(stats["std"],  dtype=np.float64),
+            "q01":  np.array(stats["q01"],  dtype=np.float64),
+            "q99":  np.array(stats["q99"],  dtype=np.float64),
+            "min":  np.array(stats.get("min", stats["q01"]), dtype=np.float64),
+            "max":  np.array(stats.get("max", stats["q99"]), dtype=np.float64),
+            "mask": np.ones(7, dtype=bool),
+        }
+    }
+    UNNORM_KEY = "libero_long"
+    print(f"LIBERO stats patched into OpenVLA. unnorm_key → '{UNNORM_KEY}'")
 
 
 def compute_reward(
