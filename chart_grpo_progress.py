@@ -36,13 +36,16 @@ tr_snap = load_log("cache/grpo_ftplanv2_snapshot.json")
 tr1     = load_log("results/grpo_run1_lr3e5.json")
 tr2     = load_log("results/grpo_run2_lr1e4.json")
 
-# Val data: one checkpoint from disk, rest from session log
-# (marked with * in legend — logged on pod but not streamed locally)
+# Val data recovered from grpo_libero_ftplanv2_stdout.log on pod (all 3 checkpoints):
+#   Run1 @ step 100: 3.1946 (model collapsed to "grab X" / "move down")
+#   Run1 @ step 200: 3.2015 (continued degrading)
+#   Run2 @ step 100: 3.1985 (fresh restart, degenerated to garbage by step 95)
+# All are above pretrain baseline 3.1899 — RL made val_CE worse in every run.
 VAL_DATA = {
     "pretrain":  {"step": 0,   "val_CE": PRETRAIN_CE, "from_disk": True},
-    "run1_100":  {"step": 100, "val_CE": 3.2015,       "from_disk": False},
-    "run1_200":  {"step": 200, "val_CE": 3.2015,       "from_disk": False},
-    "run2_100":  {"step": 100, "val_CE": 3.1985,       "from_disk": True},  # snapshot
+    "run1_100":  {"step": 100, "val_CE": 3.1946,       "from_disk": True},
+    "run1_200":  {"step": 200, "val_CE": 3.2015,       "from_disk": True},
+    "run2_100":  {"step": 100, "val_CE": 3.1985,       "from_disk": True},
 }
 
 fig, axes = plt.subplots(1, 3, figsize=(16, 5))
@@ -107,44 +110,42 @@ ax.axhline(PRETRAIN_CE, color="#888", lw=1.8, ls="--", zorder=1,
 ax.axhline(FTPLAN_BEST, color="#22aa44", lw=1.5, ls=":", zorder=1,
            label=f"FT-Plan v2 best = {FTPLAN_BEST:.4f}")
 
-# Run1 val checkpoints
+# Run1: collapsed to "grab X"→"move down" by step 100, continued degrading to step 200
 r1_steps = [0, 100, 200]
-r1_vals  = [PRETRAIN_CE, 3.2015, 3.2015]
-ax.plot(r1_steps, r1_vals, "o--", color="#e08020", lw=1.5, ms=9, zorder=4,
-        label="Run1 lr=3e-5 (collapsed to 'done')")
-for sx, sy in zip(r1_steps, r1_vals):
+r1_vals  = [PRETRAIN_CE, 3.1946, 3.2015]
+ax.plot(r1_steps, r1_vals, "o-", color="#e08020", lw=2, ms=9, zorder=4,
+        label='Run1: "grab X" → "move down" collapse')
+for i, (sx, sy) in enumerate(zip(r1_steps, r1_vals)):
+    offset = (6, 5) if i == 0 else (6, 5)
     ax.annotate(f"{sy:.4f}", (sx, sy), textcoords="offset points",
-                xytext=(6, 5), fontsize=8.5, color="#e08020")
+                xytext=offset, fontsize=8.5, color="#e08020")
 
-# Run2 / snapshot val checkpoints
+# Run2: fresh restart, degenerated to garbage (empty strings, "WRONG", unicode) by step 95
 r2_steps = [0, 100]
 r2_vals  = [PRETRAIN_CE, 3.1985]
-ax.plot(r2_steps, r2_vals, "^--", color="#6699ee", lw=1.5, ms=9, zorder=4,
-        label="Run2 / snapshot (collapsed to 'release')")
+ax.plot(r2_steps, r2_vals, "^-", color="#cc4444", lw=2, ms=9, zorder=4,
+        label='Run2 (restart): garbage outputs\n(".jpeg×80", "WRONG×80", unicode)')
 for sx, sy in zip(r2_steps, r2_vals):
     ax.annotate(f"{sy:.4f}", (sx, sy), textcoords="offset points",
-                xytext=(6, -14), fontsize=8.5, color="#6699ee")
+                xytext=(6, -15), fontsize=8.5, color="#cc4444")
 
-# Annotate the degradation arrows
-ax.annotate("", xy=(100, 3.2015), xytext=(100, PRETRAIN_CE),
-            arrowprops=dict(arrowstyle="->", color="#e08020", lw=1.5))
-ax.annotate("", xy=(100, 3.1985), xytext=(100, PRETRAIN_CE - 0.003),
-            arrowprops=dict(arrowstyle="->", color="#6699ee", lw=1.5))
+# Shade degraded zone
+ax.axhspan(PRETRAIN_CE, 3.215, color="#ffeeee", alpha=0.35, zorder=0, label="Worse than pretrain")
 
 ax.set_xlabel("RL training step", fontsize=10)
 ax.set_ylabel("val_CE (↓ better)", fontsize=10)
-ax.set_title("val_CE per checkpoint\n(● disk  ○ session log*)", fontsize=10)
-ax.legend(fontsize=8, loc="center right")
+ax.set_title("val_CE per step — all runs above pretrain\n(all data from pod stdout log)", fontsize=10)
+ax.legend(fontsize=8, loc="upper left")
 ax.grid(True, alpha=0.3)
-ax.set_ylim([3.175, 3.215])
+ax.set_ylim([3.183, 3.215])
 ax.set_xlim([-10, 220])
 
 # Footnote
 fig.text(0.5, -0.04,
-         "* val_CE at step 0 = pretrain baseline (3.1899). Step 100/200 values logged on pod during run; "
-         "only snapshot val (step 99 = 3.1985) survived in local JSON.\n"
-         "Root cause: Qwen3 learns short tokens minimize CE on training samples "
-         "(OpenVLA was pretrained on short commands) — but val distribution differs → CE rises.",
+         "Run1 plan examples → step 100: 'grab the bowl'×K, step 200: 'move down'×K  |  "
+         "Run2 plan examples → step 95: '.jpeg.jpeg…'×80, 'ACTION_TYPE_ENUM.ACTION_END_SIMULATION'\n"
+         "Root cause: OpenVLA pretrained on short action strings → short/garbage tokens minimize CE on training dist. "
+         "Val dist. is different → these degenerate sub-goals are worse, not better.",
          ha="center", fontsize=8, color="#555555",
          bbox=dict(boxstyle="round", facecolor="#f5f5f5", alpha=0.7))
 
