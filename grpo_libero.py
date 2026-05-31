@@ -5,9 +5,10 @@ OpenVLA checkpoint as the (frozen) reward model.
 For each training step:
   1. Sample a LIBERO train episode + random timestep
   2. Feed last N frames + goal to Qwen K times (temperature sampling) → K sub-goals
-  3. For each sub-goal, pass it + current frame to FT-Plan OpenVLA → predicted action
-  4. Reward = -L2(predicted, GT)
-  5. GRPO normalise + PPO-clipped update on Qwen3 LoRA adapters
+  3. For each sub-goal, compute reward = -CE(OpenVLA | sub_goal → GT_action)
+     i.e. reward = log P(GT_action | sub_goal, frame, goal) under FT-Plan model
+     This gives real per-sample variance; L2 on discretised actions was always 0.
+  4. GRPO normalise + PPO-clipped update on Qwen3 LoRA adapters
 
 Usage:
   # RL on FT-Plan v2 (A-only prompt)
@@ -226,7 +227,7 @@ def _val_eval(variant_mode: str) -> dict:
     }
 
 # ── GRPO step ─────────────────────────────────────────────────────────────────
-def _grpo_step(goal, frames, t, variant_mode, optimizer,
+def _grpo_step(goal, frames, t, variant_mode, optimizer, gt_action,
                k=K_SAMPLES, temperature=TEMPERATURE,
                entropy_coef=0.0, clip_norm=1.0, ep_idx=0) -> dict:
     v = assign_variant(ep_idx, t) if variant_mode == "mix" else variant_mode
@@ -239,12 +240,12 @@ def _grpo_step(goal, frames, t, variant_mode, optimizer,
             lp, _ = _seq_log_prob(inputs, s)
             old_lps.append(lp.detach())
 
-    # Rewards
-    rewards = np.array([
-        _compute_reward(goal, frames[t], actions[t] if hasattr(actions, '__getitem__')
-                        else actions, s)
-        for s in step1s
-    ], dtype=np.float32)
+    # Rewards: -CE(OpenVLA | sub_goal → GT_action). Differs per sub-goal; L2 did not.
+    with torch.no_grad():
+        rewards = np.array([
+            -_compute_ce(goal, frames[t], gt_action, s)
+            for s in step1s
+        ], dtype=np.float32)
     r_mean     = rewards.mean()
     r_std      = rewards.std() + 1e-8
     advantages = (rewards - r_mean) / r_std
@@ -292,7 +293,9 @@ def main():
     ap.add_argument("--output",       type=Path,
                     default=RESULTS_DIR / "grpo_libero_log.json")
     ap.add_argument("--resume_from",  type=Path,  default=None)
-    ap.add_argument("--resume_step",  type=int,   default=0)
+    ap.add_argument("--resume_step",       type=int,   default=0)
+    ap.add_argument("--skip_pretrain_val", action="store_true",
+                    help="Skip pre-training val baseline (use when already confirmed)")
     ap.add_argument("--log",          type=Path,
                     default=RESULTS_DIR / "grpo_libero.log")
     args = ap.parse_args()
@@ -370,7 +373,7 @@ def main():
         print(f"Resumed log: {len(log)} entries, best val so far: {best_val:.4f}")
 
     # ── Pre-training val ───────────────────────────────────────────────────────
-    if args.resume_step == 0:
+    if args.resume_step == 0 and not args.skip_pretrain_val:
         print("Pre-training val baseline...")
         val = _val_eval(args.variant)
         log.append({"step": -1, **val})
@@ -396,26 +399,18 @@ def main():
         rng = np.random.default_rng(step)
         t   = int(rng.integers(N_HISTORY, T))
 
-        # Closure to pass actions correctly into _grpo_step
-        class _ActionsProxy:
-            def __getitem__(self, i): return actions[i]
         result = _grpo_step(
             goal, frames, t, args.variant, optimizer,
+            gt_action=actions[t],
             k=args.k_samples, temperature=args.temperature,
             entropy_coef=args.entropy_coef, clip_norm=args.clip_norm,
             ep_idx=ep_idx)
-        # Redo reward properly — pass gt action directly
-        rewards = np.array([
-            _compute_reward(goal, frames[t], actions[t], s)
-            for s in result["step1s"]], dtype=np.float32)
-        result["rewards"] = rewards.tolist()
-        result["mean_reward"] = float(rewards.mean())
 
         result["step"] = step
         result["goal"] = goal[:80]
         log.append(result)
 
-        print(f"Step {step:4d} | mean={result['mean_reward']:+.4f} | "
+        print(f"Step {step:4d} | ce_rew={result['mean_reward']:+.4f} | "
               f"std={result['reward_std']:.4f} | grad={result['grad_norm']:.4f} | "
               f"variant={result['variant']} | "
               f"plans={result['step1s'][:2]}")
