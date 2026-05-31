@@ -46,7 +46,7 @@ LORA_TARGETS = ["q_proj", "k_proj", "v_proj", "o_proj",
 
 VAL_EPISODES       = 40
 VAL_STRIDE         = 40
-VAL_FREQ           = 100
+VAL_FREQ           = 50
 COLLAPSE_WINDOW    = 30
 COLLAPSE_THRESHOLD = 0.01
 
