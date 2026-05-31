@@ -34,6 +34,8 @@ v3_data = [
     {"opt_step": 800, "val_ce": 3.3469306927393463,  "deltas": {"weather": -0.0018874692916868163, "cake": -0.008929896354675115}},
     {"opt_step": 900, "val_ce": 3.3640293439521507,  "deltas": {"weather": -0.04412234783172586,  "cake": -0.044603810310363645}},
     {"opt_step": 1000, "val_ce": 3.343798521248733,  "deltas": {"weather":  0.04826022148132347,  "cake":  0.04870706081390397}},
+    {"opt_step": 1100, "val_ce": 3.3076820855631546, "deltas": {"weather":  0.055657949447631694, "cake":  0.05404345035552982}},
+    {"opt_step": 1200, "val_ce": 3.3115215393550255, "deltas": {"weather":  0.015577449798584109, "cake":  0.02105723381042468}},
 ]
 # Try loading real log
 try:
@@ -57,7 +59,7 @@ dc_v3    = [x["deltas"].get("cake", 0) for x in v3_data]
 # ── Plot ──────────────────────────────────────────────────────────────────────
 fig, axes = plt.subplots(1, 2, figsize=(12, 5))
 fig.suptitle("FT-Plan v3 Training: A/B/E Prompt Mix vs v2 (A-only)\n"
-             f"Pod 2 (A100 80GB), {steps_v3[-1]} opt-steps so far",
+             f"Pod 2 (A100 80GB), {steps_v3[-1]} opt-steps — best={min(ces_v3):.4f} @ step {steps_v3[ces_v3.index(min(ces_v3))]}",
              fontsize=12, y=1.01)
 
 # Left: val CE convergence
