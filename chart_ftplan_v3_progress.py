@@ -23,11 +23,12 @@ FTPLAN_V2_BEST = 3.1889
 LOG_PATH = Path("cache/ftplan_v3_log.json")
 # Check if we have a local copy; if not load inline data
 v3_data = [
-    {"opt_step": 0,   "val_ce": 13.84917653483503,  "deltas": {"weather": 0.24607910156250057, "cake": 1.150387077331544}},
+    {"opt_step": 0,   "val_ce": 13.84917653483503,  "deltas": {"weather": 0.24607910156250057,  "cake": 1.150387077331544}},
     {"opt_step": 100, "val_ce": 4.007508395349278,   "deltas": {"weather": 0.03218112945556628,  "cake": 0.009601802825927486}},
     {"opt_step": 200, "val_ce": 3.7116723674185135,  "deltas": {"weather": 0.017545614242553853, "cake": 0.026975650787353533}},
     {"opt_step": 300, "val_ce": 3.582540317055057,   "deltas": {"weather": 0.004390130043030016, "cake": 0.01068383693695063}},
     {"opt_step": 400, "val_ce": 3.508535266360816,   "deltas": {"weather": 0.03184607028961173,  "cake": 0.04357860565185545}},
+    {"opt_step": 500, "val_ce": 3.479826079133679,   "deltas": {"weather": -0.004111042022704847, "cake": 0.004956574440002637}},
 ]
 # Try loading real log
 try:
