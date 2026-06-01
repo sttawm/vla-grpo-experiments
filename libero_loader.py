@@ -48,23 +48,15 @@ def _task_map() -> dict[int, str]:
 
 
 def _load_dataset_smart():
-    """Load from local blob cache (streaming=True over disk) if available, else HF network stream.
+    """Load dataset with streaming=True (no Arrow cache).
 
-    streaming=False builds an Arrow cache which needs ~2x the dataset disk space.
-    Using streaming=True with local data_files reads parquet blobs directly — no extra space needed.
+    Uses HF's standard loader which handles image decoding correctly via the
+    dataset's feature schema. If the dataset is in local HF cache, reads from
+    disk; otherwise streams from HF. Raw parquet loading bypasses feature schema
+    and breaks PIL image decoding, so we always use the standard path.
     """
     import os
-    from pathlib import Path
     from datasets import load_dataset
-
-    hf_home = Path(os.environ.get("HF_HOME", "/workspace/hf_cache"))
-    snap_base = hf_home / "hub" / "datasets--lerobot--libero_10_image" / "snapshots"
-    if snap_base.exists():
-        snaps = [p for p in snap_base.iterdir() if p.is_dir()]
-        if snaps:
-            parquet_glob = str(snaps[0] / "data" / "**" / "*.parquet")
-            return load_dataset("parquet", data_files={"train": parquet_glob},
-                                split="train", streaming=True)
     return load_dataset(DATASET_ID, split="train", streaming=True)
 
 

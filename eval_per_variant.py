@@ -100,12 +100,14 @@ def sample_sub_goal(qwen_proc, qwen_model, goal, frames, variant):
                              f"Here are the last {len(imgs)} frames "
                              f"(oldest → newest).\n\n" + prompt_text)}])
     messages = [{"role": "user", "content": content}]
-    text = qwen_proc.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-    inputs = qwen_proc(text=text, images=imgs, return_tensors="pt",
+    # enable_thinking=False: Qwen3 thinking mode burns max_new_tokens budget on <think> tokens
+    text = qwen_proc.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True, enable_thinking=False)
+    inputs = qwen_proc(text=[text], images=imgs, return_tensors="pt",
                        padding=True).to(DEVICE)
     with torch.no_grad():
-        out = qwen_model.generate(**inputs, max_new_tokens=80,
-                                   do_sample=False, temperature=None, top_p=None)
+        out = qwen_model.generate(**inputs, max_new_tokens=120,
+                                   do_sample=False)
     new_ids = out[0][inputs["input_ids"].shape[1]:]
     return qwen_proc.decode(new_ids, skip_special_tokens=True).strip()
 
