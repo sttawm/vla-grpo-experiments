@@ -35,7 +35,7 @@ DEVICE       = "cuda"
 DTYPE        = torch.bfloat16
 N_HISTORY    = 4
 UNNORM_KEY   = "libero_long"
-K_SAMPLES    = 8
+K_SAMPLES    = 16
 TEMPERATURE  = 1.0
 EPS_CLIP     = 0.2
 LORA_RANK    = 32
@@ -56,15 +56,15 @@ RESULTS_DIR.mkdir(exist_ok=True)
 # ── Prompt variants (same as FT-Plan-v3) ──────────────────────────────────────
 PROMPT_VARIANTS = {
     "A": (
-        "What is the next immediate action for the robot arm? "
+        "What are the next two immediate actions for the robot arm? "
         "Be more specific and lower-level than the goal — describe the "
-        "exact physical movement.\n\n1. [action]"
+        "exact physical movements.\n\n1. [action]\n2. [action]"
     ),
     "B": (
-        "Describe the robot gripper's next movement in precise physical terms: "
+        "Describe the robot gripper's next two movements in precise physical terms: "
         "direction (e.g. up/down/left/right/forward/back), approximate distance "
-        "(tiny/small/medium), and gripper state (open/closing/closed/opening). "
-        "One sentence only.\n\n1. [action]"
+        "(tiny/small/medium), and gripper state (open/closing/closed/opening).\n\n"
+        "1. [action]\n2. [action]"
     ),
     "E": (
         "What are the next two immediate sub-goals for the robot arm, "
@@ -229,16 +229,22 @@ def _val_eval(variant_mode: str) -> dict:
 # ── GRPO step ─────────────────────────────────────────────────────────────────
 def _grpo_step(goal, frames, t, variant_mode, optimizer, gt_action,
                k=K_SAMPLES, temperature=TEMPERATURE,
-               entropy_coef=0.0, clip_norm=1.0, ep_idx=0) -> dict:
+               entropy_coef=0.0, clip_norm=1.0, beta=0.04, ep_idx=0) -> dict:
     v = assign_variant(ep_idx, t) if variant_mode == "mix" else variant_mode
     step1s, inputs = _sample_sub_goals(goal, frames[:t+1], v, k=k, temperature=temperature)
 
-    # Old log probs (no grad)
+    # Old log probs and reference log probs (no grad)
     old_lps = []
+    ref_lps = []
     with torch.no_grad():
         for s in step1s:
             lp, _ = _seq_log_prob(inputs, s)
             old_lps.append(lp.detach())
+        # Reference: base Qwen3 without LoRA adapters
+        with _qwen_model.disable_adapter():
+            for s in step1s:
+                lp, _ = _seq_log_prob(inputs, s)
+                ref_lps.append(lp.detach())
 
     # Rewards: -CE(OpenVLA | sub_goal → GT_action). Differs per sub-goal; L2 did not.
     with torch.no_grad():
@@ -250,27 +256,32 @@ def _grpo_step(goal, frames, t, variant_mode, optimizer, gt_action,
     r_std      = rewards.std() + 1e-8
     advantages = (rewards - r_mean) / r_std
 
-    # PPO update
+    # PPO update with KL penalty against reference policy
     optimizer.zero_grad()
     total_loss = 0.0
-    for s, adv, old_lp in zip(step1s, advantages, old_lps):
+    for s, adv, old_lp, ref_lp in zip(step1s, advantages, old_lps, ref_lps):
         new_lp, entropy = _seq_log_prob(inputs, s)
         ratio   = torch.exp(new_lp - old_lp)
         adv_t   = torch.tensor(float(adv), device=DEVICE)
         clipped = torch.clamp(ratio, 1 - EPS_CLIP, 1 + EPS_CLIP)
+        kl      = (new_lp - ref_lp).clamp(min=0)  # one-sided: only penalise when new_lp > ref_lp
         loss    = (-torch.min(ratio * adv_t, clipped * adv_t)
-                   - entropy_coef * entropy) / k
+                   - entropy_coef * entropy
+                   + beta * kl) / k
         loss.backward()
         total_loss += loss.item()
 
     grad_norm = torch.nn.utils.clip_grad_norm_(_qwen_model.parameters(), clip_norm)
     optimizer.step()
 
+    mean_kl = (sum(max((o - r).item(), 0.0) for o, r in zip(old_lps, ref_lps)) / k
+               if ref_lps else 0.0)
     return {
         "rewards": rewards.tolist(), "mean_reward": float(r_mean),
         "reward_std": float(r_std - 1e-8),
         "advantages": advantages.tolist(),
         "loss": total_loss, "grad_norm": float(grad_norm),
+        "mean_kl": mean_kl,
         "step1s": step1s, "variant": v,
     }
 
@@ -286,7 +297,9 @@ def main():
                     help="Qwen3 prompt variant (or 'mix' for deterministic A/B/E per sample)")
     ap.add_argument("--steps",        type=int,  default=1000)
     ap.add_argument("--k_samples",    type=int,  default=K_SAMPLES)
-    ap.add_argument("--lr",           type=float, default=3e-4)
+    ap.add_argument("--lr",           type=float, default=1e-5)
+    ap.add_argument("--beta",         type=float, default=0.04,
+                    help="KL penalty coefficient against frozen reference policy")
     ap.add_argument("--entropy_coef", type=float, default=0.0)
     ap.add_argument("--clip_norm",    type=float, default=1.0)
     ap.add_argument("--temperature",  type=float, default=TEMPERATURE)
@@ -404,15 +417,15 @@ def main():
             gt_action=actions[t],
             k=args.k_samples, temperature=args.temperature,
             entropy_coef=args.entropy_coef, clip_norm=args.clip_norm,
-            ep_idx=ep_idx)
+            beta=args.beta, ep_idx=ep_idx)
 
         result["step"] = step
         result["goal"] = goal[:80]
         log.append(result)
 
         print(f"Step {step:4d} | ce_rew={result['mean_reward']:+.4f} | "
-              f"std={result['reward_std']:.4f} | grad={result['grad_norm']:.4f} | "
-              f"variant={result['variant']} | "
+              f"std={result['reward_std']:.4f} | kl={result['mean_kl']:+.4f} | "
+              f"grad={result['grad_norm']:.4f} | variant={result['variant']} | "
               f"plans={result['step1s'][:2]}")
 
         # Checkpoint every 100 steps
