@@ -1,20 +1,25 @@
 """Per-variant val eval on a FT-Plan checkpoint.
 
 Loads the FT-Plan v3 best checkpoint (OpenVLA LoRA) and runs val CE
-for each prompt variant (A, B, E) independently using greedy Qwen3 decoding.
-This tells us which variant the fine-tuned OpenVLA responds to best,
-informing which variant to use for GRPO RL tuning.
+for each prompt variant (goal_only, A, B, E) independently.
+goal_only: OpenVLA prompted with just the task goal, no sub-goal.
+A/B/E: greedy Qwen3-VL-8B sub-goal, then OpenVLA CE.
 
 Usage:
     python eval_per_variant.py --ftplan_ckpt results/openvla_libero_ftplan_v3/best
-    python eval_per_variant.py --ftplan_ckpt results/openvla_libero_ftplan_v3/best --variants A B E
+    python eval_per_variant.py --ftplan_ckpt results/openvla_libero_ftplan_v3/best --variants goal_only A B E
 """
-import os, json, argparse, numpy as np, torch
+import os, json, argparse, re, numpy as np, torch
 from pathlib import Path
 from PIL import Image
 
+def _sanitize(text: str, maxlen: int = 200) -> str:
+    """Strip non-ASCII characters to prevent OpenVLA tokenizer OOB token IDs."""
+    return re.sub(r'[^\x20-\x7E]', ' ', text)[:maxlen].strip()
+
 os.environ.setdefault("HF_HOME", "/workspace/hf_cache")
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+os.environ.setdefault("CUDA_LAUNCH_BLOCKING", "1")  # synchronous CUDA errors → catchable
 
 from transformers import AutoProcessor, AutoModelForVision2Seq
 from peft import PeftModel
@@ -23,10 +28,11 @@ DEVICE = "cuda"
 DTYPE  = torch.bfloat16
 UNNORM_KEY    = "bridge_orig"
 N_HISTORY     = 4
-VAL_EPISODES  = 40
+VAL_EPISODES  = 40   # total; split evenly across variants (10 each for 4 variants)
 VAL_STRIDE    = 40
 _ACTION_DIM   = 7
 _IGNORE_IDX   = -100
+ALL_VARIANTS  = ["goal_only", "A", "B", "E"]
 
 PROMPT_VARIANTS = {
     "A": ("What is the next sub-goal the robot should complete "
@@ -46,16 +52,21 @@ PROMPT_VARIANTS = {
           "Just the next immediate sub-goal."),
 }
 
-def _tokenize_action(action: np.ndarray, stats: dict) -> list[int]:
-    lo = np.array(stats["q01"], dtype=np.float64)
-    hi = np.array(stats["q99"], dtype=np.float64)
-    norm = np.clip((action - lo) / (hi - lo + 1e-8), 0.0, 1.0)
-    bins = np.floor(norm * 256).clip(0, 255).astype(int)
-    return [32000 + b for b in bins]
+def _tokenize_action(action: np.ndarray, stats: dict, reward_model) -> np.ndarray:
+    q01  = np.array(stats["q01"], dtype=np.float64)
+    q99  = np.array(stats["q99"], dtype=np.float64)
+    norm = np.clip(2 * (action - q01) / (q99 - q01) - 1, -1.0, 1.0)
+    bidx = np.clip(np.digitize(norm, reward_model.bins) - 1,
+                   0, len(reward_model.bin_centers) - 1)
+    return (reward_model.vocab_size - bidx - 1).astype(np.int64)
 
 def compute_ce(reward_proc, reward_model, goal, frame, action, sub_goal, stats):
-    prompt = (f"In: What action should the robot take to {sub_goal} "
-              f"in order to {goal}?\nOut:")
+    """sub_goal=None → goal-only prompt (no sub-goal)."""
+    if sub_goal is None:
+        prompt = f"In: What action should the robot take to {goal}?\nOut:"
+    else:
+        prompt = (f"In: What action should the robot take to {sub_goal} "
+                  f"in order to {goal}?\nOut:")
     enc       = reward_proc(prompt, Image.fromarray(frame), return_tensors="pt")
     input_ids = enc["input_ids"].to(DEVICE)
     pix_vals  = enc["pixel_values"].to(DEVICE, dtype=DTYPE)
@@ -64,9 +75,15 @@ def compute_ce(reward_proc, reward_model, goal, frame, action, sub_goal, stats):
         tok       = torch.tensor([[29871]], device=DEVICE)
         input_ids = torch.cat([input_ids, tok], dim=1)
         attn_mask = torch.cat([attn_mask, torch.ones_like(tok)], dim=1)
-    act_tok   = torch.tensor(_tokenize_action(action, stats), device=DEVICE).unsqueeze(0)
+    act_tok   = torch.tensor(_tokenize_action(action, stats, reward_model),
+                              device=DEVICE).unsqueeze(0)
     input_ids = torch.cat([input_ids, act_tok], dim=1)
     attn_mask = torch.cat([attn_mask, torch.ones((1, _ACTION_DIM), device=DEVICE)], dim=1)
+    # Guard: skip if any token ID is out of range (would trigger CUDA device-side assert)
+    max_id = int(input_ids.max().item())
+    if max_id >= reward_model.vocab_size:
+        print(f"  WARNING: OOB token {max_id} >= {reward_model.vocab_size}, skipping sample")
+        return float("inf")
     labels    = torch.full_like(input_ids, _IGNORE_IDX)
     labels[:, -_ACTION_DIM:] = act_tok
     with torch.no_grad():
@@ -94,18 +111,25 @@ def sample_sub_goal(qwen_proc, qwen_model, goal, frames, variant):
 
 def eval_variant(variant, qwen_proc, qwen_model, reward_proc, reward_model,
                  stats, val_episodes):
-    from libero_loader import iter_episodes  # noqa: F401 (imported for side-effects)
     ces = []
     sub_goal_examples = []
-    print(f"\n  Variant {variant}: evaluating {VAL_EPISODES} episodes...")
+    n = len(val_episodes)
+    print(f"\n  Variant {variant}: evaluating {n} episodes...")
     for ep_idx, goal, frames, actions in val_episodes:
         T = len(frames)
         for t in range(N_HISTORY, T, VAL_STRIDE):
-            sg = sample_sub_goal(qwen_proc, qwen_model, goal, frames[:t+1], variant)
-            ce = compute_ce(reward_proc, reward_model, goal, frames[t], actions[t], sg, stats)
+            if variant == "goal_only":
+                sg = None
+            else:
+                sg = _sanitize(sample_sub_goal(qwen_proc, qwen_model, goal, frames[:t+1], variant))
+            try:
+                ce = compute_ce(reward_proc, reward_model, goal, frames[t], actions[t], sg, stats)
+            except RuntimeError as e:
+                print(f"  WARNING: compute_ce failed ep={ep_idx} t={t}: {e}")
+                continue
             ces.append(ce)
             if len(sub_goal_examples) < 3:
-                sub_goal_examples.append((goal[:50], sg[:80]))
+                sub_goal_examples.append((goal[:50], str(sg)[:80]))
     val_ce = float(np.mean(ces)) if ces else float("inf")
     return val_ce, sub_goal_examples
 
@@ -113,8 +137,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--ftplan_ckpt", type=Path, required=True,
                     help="FT-Plan best checkpoint dir (OpenVLA LoRA)")
-    ap.add_argument("--variants", nargs="+", default=["A", "B", "E"],
-                    choices=["A", "B", "E"])
+    ap.add_argument("--variants", nargs="+", default=ALL_VARIANTS,
+                    choices=ALL_VARIANTS)
     ap.add_argument("--output", type=Path,
                     default=Path("results/eval_per_variant.json"))
     args = ap.parse_args()
@@ -123,7 +147,7 @@ def main():
     #    sensitivity to variant, using fresh Qwen3 to generate sub-goals) ───────
     print("Loading Qwen3-VL-8B...")
     qwen_proc  = AutoProcessor.from_pretrained(
-        "Qwen/Qwen3-VL-8B-Instruct", local_files_only=True)
+        "Qwen/Qwen3-VL-8B-Instruct", local_files_only=True, use_fast=False)
     qwen_model = AutoModelForVision2Seq.from_pretrained(
         "Qwen/Qwen3-VL-8B-Instruct", torch_dtype=DTYPE,
         device_map=DEVICE, attn_implementation="eager", local_files_only=True)
@@ -153,19 +177,24 @@ def main():
         p.requires_grad_(False)
     print("FT-Plan OpenVLA ready.")
 
-    # ── Pre-load val episodes ─────────────────────────────────────────────────
+    # ── Pre-load val episodes and split across variants ───────────────────────
     from libero_loader import iter_episodes
-    print(f"Pre-loading {VAL_EPISODES} val episodes...")
-    val_episodes = list(iter_episodes("val", max_episodes=VAL_EPISODES,
-                                      seed=42, yield_ep_idx=True))
-    print(f"  Loaded {len(val_episodes)} episodes.")
+    print(f"Pre-loading {VAL_EPISODES} val episodes (seed=42)...")
+    all_eps = list(iter_episodes("val", max_episodes=VAL_EPISODES,
+                                 seed=42, yield_ep_idx=True))
+    print(f"  Loaded {len(all_eps)} episodes.")
+    n_variants = len(args.variants)
+    chunk = len(all_eps) // n_variants
+    ep_chunks = {v: all_eps[i*chunk:(i+1)*chunk]
+                 for i, v in enumerate(args.variants)}
+    print(f"  {chunk} episodes per variant: {args.variants}")
 
-    # ── Eval each variant ─────────────────────────────────────────────────────
+    # ── Eval each variant on its chunk ────────────────────────────────────────
     results = {}
     for variant in args.variants:
         val_ce, examples = eval_variant(
             variant, qwen_proc, qwen_model, reward_proc, reward_model,
-            stats, val_episodes)
+            stats, ep_chunks[variant])
         results[variant] = {"val_ce": val_ce, "examples": examples}
         print(f"  Variant {variant}: val_CE = {val_ce:.4f}")
         for goal, sg in examples:
@@ -173,19 +202,27 @@ def main():
             print(f"    sub-goal: {sg!r}")
 
     # ── Summary ───────────────────────────────────────────────────────────────
-    print("\n" + "="*50)
-    print("PER-VARIANT VAL CE SUMMARY")
-    print("="*50)
+    valid_ces = [r["val_ce"] for r in results.values() if r["val_ce"] < float("inf")]
+    overall_avg = float(np.mean(valid_ces)) if valid_ces else float("inf")
     best_variant = min(results, key=lambda v: results[v]["val_ce"])
+
+    print("\n" + "="*50)
+    print("PER-VARIANT VAL CE SUMMARY (FT-Plan v3 best ckpt)")
+    print("="*50)
     for v in args.variants:
         marker = " ← BEST" if v == best_variant else ""
-        print(f"  Variant {v}: {results[v]['val_ce']:.4f}{marker}")
+        print(f"  {v:10s}: {results[v]['val_ce']:.4f}{marker}")
+    print(f"  {'AVERAGE':10s}: {overall_avg:.4f}  (across {n_variants} variants)")
     print(f"\nRecommend RL tuning with variant: {best_variant}")
 
     args.output.parent.mkdir(exist_ok=True)
     with open(args.output, "w") as f:
-        json.dump({v: {"val_ce": r["val_ce"],
-                       "examples": r["examples"]} for v, r in results.items()},
+        json.dump({"variants": {v: {"val_ce": r["val_ce"],
+                                    "n_episodes": chunk,
+                                    "examples": r["examples"]}
+                                for v, r in results.items()},
+                   "overall_avg_ce": overall_avg,
+                   "best_variant": best_variant},
                   f, indent=2)
     print(f"Saved → {args.output}")
 

@@ -1,8 +1,9 @@
 """Chart FT-Plan v3 training convergence vs v2 baseline.
 
-FT-Plan v3: uses deterministic A/B/E prompt assignment (ep*1000+t) % 3
-with precomputed cache + online Qwen3 fallback.
-FT-Plan v2: A-only prompt, converged to val_CE=3.1889.
+FT-Plan v3: deterministic A/B/E variant assignment (ep*1000+t) % 3,
+precomputed Qwen3-VL-8B cache + online fallback.
+FT-Plan v2: same 1/3 goal-only + 2/3 sub-goal mix, Qwen2.5-VL sub-goals,
+single variant (A-format). Converged to val_CE=3.1889.
 """
 import json
 import numpy as np
@@ -42,6 +43,7 @@ v3_data = [
     {"opt_step": 1600, "val_ce": 3.261502768625231,  "deltas": {"weather":  0.044999313354492365, "cake":  0.03503021717071553}},
     {"opt_step": 1700, "val_ce": 3.2684379285749268, "deltas": {"weather":  0.02451191902160632,  "cake":  0.02031200885772666}},
     {"opt_step": 1800, "val_ce": 3.256883341599913,  "deltas": {"weather": -0.002766685485839915, "cake":  0.025816044807434047}},
+    {"opt_step": 1900, "val_ce": 3.266900730045403,  "deltas": {"weather":  0.065611414909362950, "cake":  0.049582872390747210}},
 ]
 # Try loading real log
 try:
@@ -64,7 +66,7 @@ dc_v3    = [x["deltas"].get("cake", 0) for x in v3_data]
 
 # ── Plot ──────────────────────────────────────────────────────────────────────
 fig, axes = plt.subplots(1, 2, figsize=(12, 5))
-fig.suptitle("FT-Plan v3 Training: A/B/E Prompt Mix vs v2 (A-only)\n"
+fig.suptitle("FT-Plan v3 Training: Qwen3 A/B/E variants vs v2 (Qwen2.5 A-format)\n"
              f"Pod 2 (A100 80GB), {steps_v3[-1]} opt-steps — best={min(ces_v3):.4f} @ step {steps_v3[ces_v3.index(min(ces_v3))]}",
              fontsize=12, y=1.01)
 
@@ -78,7 +80,7 @@ for sx, sy in zip(steps_v3, ces_v3):
 
 # v2 reference points
 ax.scatter([0, 2600], [16.71, 3.1889], color="#e08020", s=100, marker="D",
-           label="FT-Plan v2 (A-only) reference", zorder=4)
+           label="FT-Plan v2 (Qwen2.5-VL, A-format sub-goals) reference", zorder=4)
 ax.annotate("16.71 (init)", (0, 16.71), textcoords="offset points",
             xytext=(10, -15), fontsize=8, color="#e08020")
 ax.annotate(f"3.1889 (best, step 2600)", (2600, 3.1889), textcoords="offset points",

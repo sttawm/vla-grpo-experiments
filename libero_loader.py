@@ -47,6 +47,27 @@ def _task_map() -> dict[int, str]:
     return {int(row["task_index"]): str(task) for task, row in df.iterrows()}
 
 
+def _load_dataset_smart():
+    """Load from local blob cache (streaming=True over disk) if available, else HF network stream.
+
+    streaming=False builds an Arrow cache which needs ~2x the dataset disk space.
+    Using streaming=True with local data_files reads parquet blobs directly — no extra space needed.
+    """
+    import os
+    from pathlib import Path
+    from datasets import load_dataset
+
+    hf_home = Path(os.environ.get("HF_HOME", "/workspace/hf_cache"))
+    snap_base = hf_home / "hub" / "datasets--lerobot--libero_10_image" / "snapshots"
+    if snap_base.exists():
+        snaps = [p for p in snap_base.iterdir() if p.is_dir()]
+        if snaps:
+            parquet_glob = str(snaps[0] / "data" / "**" / "*.parquet")
+            return load_dataset("parquet", data_files={"train": parquet_glob},
+                                split="train", streaming=True)
+    return load_dataset(DATASET_ID, split="train", streaming=True)
+
+
 def iter_episodes(split: str, max_episodes: int, seed: int = 42,
                   yield_ep_idx: bool = False):
     """
@@ -79,7 +100,11 @@ def iter_episodes(split: str, max_episodes: int, seed: int = 42,
     target_set = set(ep_ids[:max_episodes])
 
     task_map = _task_map()
-    ds = load_dataset(DATASET_ID, split="train", streaming=True)
+    ds = _load_dataset_smart()
+    ep_ds = ds.filter(
+        lambda batch: [int(e) in target_set for e in batch["episode_index"]],
+        batched=True, batch_size=2048,
+    )
 
     cur_ep: int = -1
     cur_frames: list[np.ndarray] = []
@@ -87,13 +112,12 @@ def iter_episodes(split: str, max_episodes: int, seed: int = 42,
     cur_task_idx: int = 0
     yielded = 0
 
-    for row in ds:
+    for row in ep_ds:
         if yielded >= max_episodes:
             break
         ep_idx = int(row["episode_index"])
 
         if ep_idx != cur_ep:
-            # Episode boundary — flush previous if it accumulated frames (was in target_set)
             if cur_frames and yielded < max_episodes:
                 goal = task_map.get(cur_task_idx, f"task_{cur_task_idx}")
                 if yield_ep_idx:
@@ -106,12 +130,11 @@ def iter_episodes(split: str, max_episodes: int, seed: int = 42,
             cur_actions = []
             cur_task_idx = int(row["task_index"])
 
-        if ep_idx in target_set:
-            cur_frames.append(np.array(row["observation.images.image"], dtype=np.uint8))
-            cur_actions.append(list(row["action"]))
+        cur_frames.append(np.array(row["observation.images.image"], dtype=np.uint8))
+        cur_actions.append(list(row["action"]))
 
     # Final flush
-    if cur_frames and cur_ep in target_set and yielded < max_episodes:
+    if cur_frames and yielded < max_episodes:
         goal = task_map.get(cur_task_idx, f"task_{cur_task_idx}")
         if yield_ep_idx:
             yield cur_ep, goal, cur_frames, np.array(cur_actions, dtype=np.float32)
@@ -123,12 +146,15 @@ def compute_action_stats(save_path: Path = STATS_PATH) -> dict:
     """Compute per-dim mean/std over all train-split episodes. Saves to JSON."""
     import os
     os.environ.setdefault("HF_HOME", "/workspace/hf_cache")
-    from datasets import load_dataset
 
     train_ids, _, _ = _split_episode_ids()
     target_set = set(train_ids)
 
-    ds = load_dataset(DATASET_ID, split="train", streaming=True)
+    ds = _load_dataset_smart()
+    ds = ds.filter(
+        lambda batch: [int(e) in target_set for e in batch["episode_index"]],
+        batched=True, batch_size=2048,
+    )
     all_actions: list[list[float]] = []
     n_ep = 0
     last_ep = -1
@@ -136,8 +162,6 @@ def compute_action_stats(save_path: Path = STATS_PATH) -> dict:
     print(f"Computing LIBERO action stats over {len(train_ids)} train episodes...")
     for row in ds:
         ep_idx = int(row["episode_index"])
-        if ep_idx not in target_set:
-            continue
         if ep_idx != last_ep:
             n_ep += 1
             last_ep = ep_idx
